@@ -9,6 +9,10 @@ Use TypeScript for all scripting files created in this project.
 Whenever changes are made in this folder, commit them and push to the `main` branch.
 Remote: https://github.com/tranceyos2419/ebay-suits.git
 
+## Instruction file synchronization
+
+Keep `AGENTS.md` and `CLAUDE.md` synchronized. Whenever a project rule is added, changed, or removed in either file, make the equivalent change in the other file during the same task.
+
 ## File organization
 
 Keep files organized by category by default:
