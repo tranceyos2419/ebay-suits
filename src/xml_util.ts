@@ -36,3 +36,19 @@ export function findErrors(xml: string): TradingError[] {
   }
   return errors;
 }
+
+/**
+ * Find every non-nested `<tag>...</tag>` block anywhere in `xml`, ignoring
+ * namespace prefixes, and return their inner contents. Mirrors findErrors'
+ * pattern but for any repeating tag (e.g. `<Item>` entries in a list
+ * response) -- assumes `tag` does not nest inside itself.
+ */
+export function findBlocks(xml: string, tag: string): string[] {
+  const blocks: string[] = [];
+  const re = new RegExp(`<(?:\\w+:)?${tag}[^>]*>([\\s\\S]*?)</(?:\\w+:)?${tag}>`, "g");
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml)) !== null) {
+    blocks.push(m[1]);
+  }
+  return blocks;
+}
