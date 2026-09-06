@@ -21,3 +21,7 @@ When adding new files, place them in the category folder they belong to rather t
 ## Which eBay account
 
 Before doing anything in this folder, make sure you know which eBay account the task applies to. If the user's message doesn't make it clear, ask them which account to work on before proceeding.
+
+## Interacting with eBay
+
+Default to using the eBay API for any interaction with eBay. Use another method (e.g. browser automation) only if the user specifies otherwise.
