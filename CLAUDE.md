@@ -6,6 +6,8 @@ Use TypeScript for all scripting files created in this project.
 
 ## Git workflow
 
+Before starting work on this project, verify the Git remote repository configured as `origin` and fetch `origin/main`. If `origin/main` contains changes that are not present in the local `main` branch, pull and apply those changes locally before making project changes. Preserve existing local and uncommitted work; if the update cannot be applied safely, stop and report the conflict before proceeding.
+
 Whenever changes are made in this folder, commit them and push to the `main` branch.
 Remote: https://github.com/tranceyos2419/ebay-suits.git
 
