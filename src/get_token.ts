@@ -6,7 +6,7 @@
  *   export EBAY_ACCESS_TOKEN=$(npx tsx get_token.ts jdm-direct-motors)
  *   npx tsx check_item.ts 397429202355
  *
- * Reads from credentials.json in the same folder. That file should be
+ * Reads from credentials.json in the project root. That file should be
  * chmod 600 (owner-read-only) and never committed to version control or
  * shared -- the tokens in it are long-lived (Auth'n'Auth tokens can be valid
  * for ~2+ years).
@@ -16,7 +16,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-const CREDS_PATH = join(dirname(fileURLToPath(import.meta.url)), "credentials.json");
+const CREDS_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "credentials.json");
 
 interface CredentialEntry {
   token?: string;

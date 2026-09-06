@@ -4,10 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check-item": "tsx check_item.ts",
-    "shipping-policy": "tsx ebay_shipping_policy_tool.ts",
-    "get-token": "tsx get_token.ts",
-    "refresh-token": "tsx refresh_token.ts"
+    "check-item": "tsx src/check_item.ts",
+    "shipping-policy": "tsx src/ebay_shipping_policy_tool.ts",
+    "get-token": "tsx src/get_token.ts",
+    "refresh-token": "tsx src/refresh_token.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
