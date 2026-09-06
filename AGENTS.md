@@ -1,0 +1,28 @@
+# AGENTS.md
+
+## Scripting language
+
+Use TypeScript for all scripting files created in this project.
+
+## Git workflow
+
+Whenever changes are made in this folder, commit them and push to the `main` branch.
+Remote: https://github.com/tranceyos2419/ebay-suits.git
+
+## File organization
+
+Keep files organized by category by default:
+
+- Source and scripting files (`.ts`, etc.) live under `src/`.
+- Project configuration (`package.json`, `package-lock.json`, `tsconfig.json`, `.gitignore`, `AGENTS.md`, `CLAUDE.md`) stays at the project root.
+- Local secrets (for example, `credentials.json`) stay at the project root, must have permissions set to `600`, and must be ignored by Git. Never move them into `src/` or commit them.
+
+When adding new files, place them in the category folder they belong to rather than the project root.
+
+## Which eBay account
+
+Before doing anything in this folder, make sure you know which eBay account the task applies to. If the user's message does not make it clear, ask which account to work on before proceeding.
+
+## Interacting with eBay
+
+Default to using the eBay API for any interaction with eBay. Use another method, such as browser automation, only if the user specifies otherwise.
