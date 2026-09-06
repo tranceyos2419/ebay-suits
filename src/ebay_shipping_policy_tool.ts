@@ -45,11 +45,15 @@
  *       --policy-id 123456789012 \
  *       --item-ids 110123456789 110987654321
  *
- *   # 4. Scan ALL active listings, find the ones on a given "source" policy
- *   #    (e.g. a generic "Express" policy), and work out which price-range
- *   #    policy (a policy literally named "$<min> - $<max>", nothing else)
- *   #    each one's current price falls into. Writes a CSV report; makes NO
- *   #    changes to eBay.
+ *   # 4. Scan ALL active listings, find the ones on one or more given
+ *   #    "source" policies (e.g. a generic "Express" policy, or every
+ *   #    "Copy" decoy policy -- pass as many --from-policy-id values as you
+ *   #    like, space-separated, in one run instead of one full-store scan
+ *   #    per policy), and work out which price-range policy (a policy
+ *   #    literally named "$<min> - $<max>", nothing else) each one's
+ *   #    CURRENT price falls into -- not the tier implied by the source
+ *   #    policy's own name, which may be stale. Writes a CSV report; makes
+ *   #    NO changes to eBay.
  *   # --items-file is a scraped "itemId,price" per line list (no header) --
  *   # e.g. from the Seller Hub "active listings filtered by shippingPolicy"
  *   # page. --ranges-file is a JSON policy catalog -- see
@@ -60,17 +64,28 @@
  *   # GetMyeBaySelling (see the NOTE above scanActiveListings in the source
  *   # for why that matters on a larger store).
  *   npx tsx ebay_shipping_policy_tool.ts migrate-by-price \
- *       --from-policy-id 273300062012 \
- *       --report-out reports/express-migration.csv \
+ *       --from-policy-id 273300062012 272284104012 272285920012 \
+ *       --report-out reports/copy-cleanup.csv \
  *       --items-file express_items.csv \
  *       --ranges-file data/policy-ranges/jdm-direct-motors.json
  *
  *   # 5. Apply the moves from a previously written report (only rows marked
- *   #    MATCH are revised; NO_MATCH rows are always left alone).
+ *   #    MATCH are revised; NO_MATCH rows are always left alone). No need to
+ *   #    repeat --from-policy-id here -- the source policy for each row is
+ *   #    read back from the report itself.
  *   npx tsx ebay_shipping_policy_tool.ts migrate-by-price \
- *       --from-policy-id 273300062012 \
- *       --report-out reports/express-migration.csv \
+ *       --report-out reports/copy-cleanup.csv \
  *       --apply
+ *
+ *   # 6. Discover every shipping policy actually in use on active listings
+ *   #    (id, name, and how many scanned listings currently sit on it) --
+ *   #    e.g. to find the policyId of a decoy/"Copy" policy you only know by
+ *   #    name, so it can be passed as --from-policy-id above. Same full-store
+ *   #    scan and 25,000-listing cap as migrate-by-price's fallback path --
+ *   #    see the NOTE above scanActiveListings. Optional --name-contains
+ *   #    filters the printed list (case-insensitive substring on the policy
+ *   #    name); omit it to see everything found.
+ *   npx tsx ebay_shipping_policy_tool.ts scan-policies --name-contains copy
  *
  * Flags
  * -----
@@ -90,6 +105,8 @@
  *                     that isn't "$min - $max", e.g. a "MAX" policy).
  *   --apply          Apply moves from an existing report instead of scanning
  *                     and writing a fresh dry-run report (migrate-by-price).
+ *   --name-contains  Case-insensitive substring filter on policy name
+ *                     (scan-policies).
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -323,12 +340,16 @@ interface SourceItem {
   itemId: string;
   title: string;
   price: number;
+  sourcePolicyId: string;
+  sourcePolicyName: string;
 }
 
 interface ReportRow {
   itemId: string;
   title: string;
   currentPrice: number;
+  sourcePolicyId: string;
+  sourcePolicyName: string;
   targetPolicyId: string;
   targetPolicyName: string;
   status: "MATCH" | "NO_MATCH";
@@ -441,12 +462,14 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Scan every active listing once: collect the price-range policy catalog
  * (from clean "$min - $max" policy names seen anywhere) and every listing
- * currently on `fromPolicyId`. One pass covers both, since a range only used
- * by a later page must still be known before matching. */
+ * currently on any policy in `fromPolicyIds`. One pass covers both, since a
+ * range only used by a later page must still be known before matching, and
+ * covers every source policy at once rather than one full store scan per
+ * source policy. */
 async function scanActiveListings(
   env: Env,
   siteId: number,
-  fromPolicyId: string
+  fromPolicyIds: Set<string>
 ): Promise<{ ranges: Map<string, PolicyRange>; sourceItems: SourceItem[] }> {
   const ranges = new Map<string, PolicyRange>();
   const sourceItemsById = new Map<string, SourceItem>();
@@ -466,8 +489,14 @@ async function scanActiveListings(
       // Keyed by itemId (not pushed to an array) so that if pagination ever
       // overlaps -- the same item showing up on two pages -- it's only
       // counted once instead of skewing the report.
-      if (item.profileId === fromPolicyId) {
-        sourceItemsById.set(item.itemId, { itemId: item.itemId, title: item.title, price: item.price });
+      if (fromPolicyIds.has(item.profileId)) {
+        sourceItemsById.set(item.itemId, {
+          itemId: item.itemId,
+          title: item.title,
+          price: item.price,
+          sourcePolicyId: item.profileId,
+          sourcePolicyName: item.profileName,
+        });
       }
     }
   };
@@ -493,6 +522,70 @@ async function scanActiveListings(
   return { ranges, sourceItems: [...sourceItemsById.values()] };
 }
 
+/** Full-store scan (same source and 25,000-listing cap as scanActiveListings'
+ * fallback path) that records EVERY distinct shipping profile id/name pair
+ * seen, with how many scanned listings currently sit on it -- unlike
+ * scanActiveListings, which only keeps names matching the clean price-range
+ * pattern. Used by scan-policies to find a policy's id from its name (e.g. a
+ * "Copy" decoy policy) without visiting the Business Policies page. */
+async function scanAllPolicies(
+  env: Env,
+  siteId: number
+): Promise<Map<string, { name: string; count: number }>> {
+  const seen = new Map<string, { name: string; count: number }>();
+  const entriesPerPage = 200;
+
+  const recordPage = (items: Awaited<ReturnType<typeof fetchActiveListingsPage>>["items"]) => {
+    for (const item of items) {
+      const existing = seen.get(item.profileId);
+      if (existing) {
+        existing.count++;
+      } else {
+        seen.set(item.profileId, { name: item.profileName, count: 1 });
+      }
+    }
+  };
+
+  const first = await fetchActiveListingsPage(env, siteId, 1, entriesPerPage);
+  const totalPages = first.totalPages;
+  recordPage(first.items);
+  console.log(`  page 1/${totalPages}, ${seen.size} distinct polic(y/ies) so far`);
+
+  for (let page = 2; page <= totalPages; page++) {
+    await sleep(PAGE_DELAY_MS);
+    const { items } = await fetchActiveListingsPage(env, siteId, page, entriesPerPage);
+    recordPage(items);
+    console.log(`  page ${page}/${totalPages}, ${seen.size} distinct polic(y/ies) so far`);
+  }
+
+  return seen;
+}
+
+async function scanPolicies(env: Env, siteId: number, nameContains: string | undefined) {
+  console.log(`Scanning all active listings for distinct shipping policies... (this can take a few minutes)`);
+  console.log(`WARNING: this scan is capped at 25,000 active listings by GetMyeBaySelling and may miss a policy`);
+  console.log(`that only appears on listings beyond the cap on a larger store.`);
+  const seen = await scanAllPolicies(env, siteId);
+
+  const needle = nameContains?.toLowerCase();
+  const rows = [...seen.entries()]
+    .map(([policyId, { name, count }]) => ({ policyId, name, count }))
+    .filter((r) => !needle || r.name.toLowerCase().includes(needle))
+    .sort((a, b) => b.count - a.count);
+
+  console.log();
+  if (nameContains) {
+    console.log(`Policies with "${nameContains}" in the name (${rows.length} of ${seen.size} distinct polic(y/ies)):`);
+  } else {
+    console.log(`${rows.length} distinct polic(y/ies) found:`);
+  }
+  console.log(`${"Policy ID".padEnd(16)} ${"Scanned listing count".padEnd(22)} Name`);
+  console.log("-".repeat(80));
+  for (const r of rows) {
+    console.log(`${r.policyId.padEnd(16)} ${String(r.count).padEnd(22)} ${r.name}`);
+  }
+}
+
 /** [min, max) -- inclusive low end, exclusive high end (confirmed boundary rule). */
 function matchRange(price: number, ranges: Map<string, PolicyRange>): PolicyRange | undefined {
   for (const range of ranges.values()) {
@@ -510,6 +603,8 @@ function buildReport(sourceItems: SourceItem[], ranges: Map<string, PolicyRange>
       itemId: item.itemId,
       title: item.title,
       currentPrice: item.price,
+      sourcePolicyId: item.sourcePolicyId,
+      sourcePolicyName: item.sourcePolicyName,
       targetPolicyId: match?.policyId ?? "",
       targetPolicyName: match?.name ?? "",
       status: match ? "MATCH" : "NO_MATCH",
@@ -526,9 +621,18 @@ function writeReportCsv(path: string, rows: ReportRow[]) {
   if (dir && dir !== "." && !existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
-  const header = "itemId,title,currentPrice,targetPolicyId,targetPolicyName,status";
+  const header = "itemId,title,currentPrice,sourcePolicyId,sourcePolicyName,targetPolicyId,targetPolicyName,status";
   const lines = rows.map((r) =>
-    [r.itemId, csvEscape(r.title), r.currentPrice, r.targetPolicyId, csvEscape(r.targetPolicyName), r.status].join(",")
+    [
+      r.itemId,
+      csvEscape(r.title),
+      r.currentPrice,
+      r.sourcePolicyId,
+      csvEscape(r.sourcePolicyName),
+      r.targetPolicyId,
+      csvEscape(r.targetPolicyName),
+      r.status,
+    ].join(",")
   );
   writeFileSync(path, [header, ...lines].join("\n") + "\n", "utf8");
 }
@@ -565,11 +669,14 @@ function readReportCsv(path: string): ReportRow[] {
         }
       }
       fields.push(cur);
-      const [itemId, title, currentPrice, targetPolicyId, targetPolicyName, status] = fields;
+      const [itemId, title, currentPrice, sourcePolicyId, sourcePolicyName, targetPolicyId, targetPolicyName, status] =
+        fields;
       return {
         itemId,
         title,
         currentPrice: parseFloat(currentPrice),
+        sourcePolicyId,
+        sourcePolicyName,
         targetPolicyId,
         targetPolicyName,
         status: status as "MATCH" | "NO_MATCH",
@@ -585,17 +692,17 @@ function printRangeCatalog(ranges: Map<string, PolicyRange>) {
   }
 }
 
-/** Fetch an item's title and current ShippingProfileID via GetItem, without
- * the console logging getItem() does (used for the bulk items-file path,
- * which would otherwise print 215 lines of noise). Also serves as a
- * re-confirmation that the item is still on `fromPolicyId` at report time --
- * an --items-file list can go stale between when it was scraped and when
- * this runs. */
+/** Fetch an item's title and current shipping profile id/name via GetItem,
+ * without the console logging getItem() does (used for the bulk items-file
+ * path, which would otherwise print 215 lines of noise). Also serves as a
+ * re-confirmation that the item is still on one of the source policies at
+ * report time -- an --items-file list can go stale between when it was
+ * scraped and when this runs. */
 async function fetchItemDetails(
   env: Env,
   itemId: string,
   siteId: number
-): Promise<{ title: string; profileId: string } | null> {
+): Promise<{ title: string; profileId: string; profileName: string } | null> {
   const xmlBody = `<?xml version="1.0" encoding="utf-8"?>
 <GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
   <ItemID>${itemId}</ItemID>
@@ -609,19 +716,21 @@ async function fetchItemDetails(
   return {
     title: findText(xml, "Title") ?? "",
     profileId: findText(xml, "ShippingProfileID") ?? "",
+    profileName: findText(xml, "ShippingProfileName") ?? "",
   };
 }
 
 async function migrateByPrice(
   env: Env,
   siteId: number,
-  fromPolicyId: string,
+  fromPolicyIds: string[],
   reportOut: string,
   apply: boolean,
   itemsFile: string | undefined,
   rangesFile: string | undefined
 ) {
   if (!apply) {
+    const fromPolicyIdSet = new Set(fromPolicyIds);
     let ranges: Map<string, PolicyRange> | undefined = rangesFile ? loadRangesFile(rangesFile) : undefined;
     let sourceItems: SourceItem[] | undefined;
 
@@ -640,27 +749,33 @@ async function migrateByPrice(
           console.log(`  WARNING: could not read item ${raw[i].itemId} (skipped)`);
           continue;
         }
-        if (details.profileId !== fromPolicyId) {
+        if (!fromPolicyIdSet.has(details.profileId)) {
           stale++;
           console.log(
-            `  NOTE: item ${raw[i].itemId} is no longer on ${fromPolicyId} (now ${details.profileId}) -- skipped`
+            `  NOTE: item ${raw[i].itemId} is no longer on a source policy (now ${details.profileId}) -- skipped`
           );
           continue;
         }
-        sourceItems.push({ itemId: raw[i].itemId, title: details.title, price: raw[i].price });
+        sourceItems.push({
+          itemId: raw[i].itemId,
+          title: details.title,
+          price: raw[i].price,
+          sourcePolicyId: details.profileId,
+          sourcePolicyName: details.profileName,
+        });
         if ((i + 1) % 25 === 0) console.log(`  ${i + 1}/${raw.length} checked...`);
         await sleep(PAGE_DELAY_MS);
       }
       if (stale > 0) {
-        console.log(`${stale} item(s) from ${itemsFile} were already moved off ${fromPolicyId} since the scrape.`);
+        console.log(`${stale} item(s) from ${itemsFile} were already moved off their source policy since the scrape.`);
       }
     }
 
     if (!ranges || !sourceItems) {
-      console.log(`Scanning all active listings for policy ${fromPolicyId}... (this can take a few minutes)`);
+      console.log(`Scanning all active listings for ${fromPolicyIds.length} source polic(y/ies)... (this can take a few minutes)`);
       console.log(`WARNING: this scan is capped at 25,000 active listings by GetMyeBaySelling and may undercount`);
       console.log(`on a larger store -- prefer --ranges-file/--items-file with UI-sourced data when possible.`);
-      const scanned = await scanActiveListings(env, siteId, fromPolicyId);
+      const scanned = await scanActiveListings(env, siteId, fromPolicyIdSet);
       ranges = ranges ?? scanned.ranges;
       sourceItems = sourceItems ?? scanned.sourceItems;
     }
@@ -672,9 +787,19 @@ async function migrateByPrice(
 
     const matched = rows.filter((r) => r.status === "MATCH").length;
     const noMatch = rows.length - matched;
-    console.log(`\nFound ${rows.length} listing(s) on source policy ${fromPolicyId}.`);
+    console.log(`\nFound ${rows.length} listing(s) across ${fromPolicyIds.length} source polic(y/ies).`);
     console.log(`  ${matched} matched a price-range policy.`);
     console.log(`  ${noMatch} did NOT match any known range (left as-is, listed in the report).`);
+
+    const bySource = new Map<string, number>();
+    for (const r of rows) {
+      bySource.set(r.sourcePolicyName, (bySource.get(r.sourcePolicyName) ?? 0) + 1);
+    }
+    console.log(`\nBy source policy:`);
+    for (const [name, count] of [...bySource.entries()].sort((a, b) => b[1] - a[1])) {
+      console.log(`  ${String(count).padEnd(6)} ${name}`);
+    }
+
     console.log(`\nReport written to ${reportOut}. Review it, then re-run with --apply to move the MATCH rows.`);
     return;
   }
@@ -703,17 +828,18 @@ async function migrateByPrice(
 
 interface ParsedArgs {
   sandbox: boolean;
-  command: "list-policies" | "check-access" | "revise-items" | "migrate-by-price";
+  command: "list-policies" | "check-access" | "revise-items" | "migrate-by-price" | "scan-policies";
   marketplace: string;
   itemIds: string[];
   policyId?: string;
   siteId: number;
   dryRun: boolean;
-  fromPolicyId?: string;
+  fromPolicyIds: string[];
   reportOut?: string;
   apply: boolean;
   itemsFile?: string;
   rangesFile?: string;
+  nameContains?: string;
 }
 
 function die(msg: string): never {
@@ -730,11 +856,12 @@ function parseArgs(argv: string[]): ParsedArgs {
     policyId: undefined,
     siteId: 0,
     dryRun: false,
-    fromPolicyId: undefined,
+    fromPolicyIds: [],
     reportOut: undefined,
     apply: false,
     itemsFile: undefined,
     rangesFile: undefined,
+    nameContains: undefined,
   };
 
   const rest: string[] = [];
@@ -751,10 +878,11 @@ function parseArgs(argv: string[]): ParsedArgs {
     command !== "list-policies" &&
     command !== "check-access" &&
     command !== "revise-items" &&
-    command !== "migrate-by-price"
+    command !== "migrate-by-price" &&
+    command !== "scan-policies"
   ) {
     die(
-      "Usage: ebay_shipping_policy_tool.ts [--sandbox] <list-policies|check-access|revise-items|migrate-by-price> [options]"
+      "Usage: ebay_shipping_policy_tool.ts [--sandbox] <list-policies|check-access|revise-items|migrate-by-price|scan-policies> [options]"
     );
   }
   args.command = command;
@@ -782,9 +910,14 @@ function parseArgs(argv: string[]): ParsedArgs {
       case "--dry-run":
         args.dryRun = true;
         break;
-      case "--from-policy-id":
-        args.fromPolicyId = rest[++i];
+      case "--from-policy-id": {
+        const ids: string[] = [];
+        while (rest[i + 1] && !rest[i + 1].startsWith("--")) {
+          ids.push(rest[++i]);
+        }
+        args.fromPolicyIds = ids;
         break;
+      }
       case "--report-out":
         args.reportOut = rest[++i];
         break;
@@ -796,6 +929,9 @@ function parseArgs(argv: string[]): ParsedArgs {
         break;
       case "--ranges-file":
         args.rangesFile = rest[++i];
+        break;
+      case "--name-contains":
+        args.nameContains = rest[++i];
         break;
       default:
         die(`Unknown option: ${a}`);
@@ -810,7 +946,9 @@ function parseArgs(argv: string[]): ParsedArgs {
     if (!args.policyId) die("--policy-id is required for revise-items");
   }
   if (args.command === "migrate-by-price") {
-    if (!args.fromPolicyId) die("--from-policy-id is required for migrate-by-price");
+    if (!args.apply && args.fromPolicyIds.length === 0) {
+      die("--from-policy-id (one or more ids) is required for migrate-by-price (unless --apply)");
+    }
     if (!args.reportOut) die("--report-out is required for migrate-by-price");
   }
 
@@ -840,7 +978,9 @@ async function main() {
       console.log(`\nAll ${results.length} item(s) revised successfully.`);
     }
   } else if (args.command === "migrate-by-price") {
-    await migrateByPrice(env, args.siteId, args.fromPolicyId!, args.reportOut!, args.apply, args.itemsFile, args.rangesFile);
+    await migrateByPrice(env, args.siteId, args.fromPolicyIds, args.reportOut!, args.apply, args.itemsFile, args.rangesFile);
+  } else if (args.command === "scan-policies") {
+    await scanPolicies(env, args.siteId, args.nameContains);
   }
 }
 
