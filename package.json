@@ -7,7 +7,8 @@
     "check-item": "tsx src/check_item.ts",
     "shipping-policy": "tsx src/ebay_shipping_policy_tool.ts",
     "get-token": "tsx src/get_token.ts",
-    "refresh-token": "tsx src/refresh_token.ts"
+    "refresh-token": "tsx src/refresh_token.ts",
+    "weekly-revenue": "tsx src/weekly_revenue.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
