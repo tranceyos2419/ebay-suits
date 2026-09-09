@@ -9,7 +9,8 @@
     "get-token": "tsx src/get_token.ts",
     "refresh-token": "tsx src/refresh_token.ts",
     "weekly-revenue": "tsx src/weekly_revenue.ts",
-    "find-eligible-offers": "tsx src/find_eligible_offer_items.ts"
+    "find-eligible-offers": "tsx src/find_eligible_offer_items.ts",
+    "find-return-by-tracking": "tsx src/find_return_by_tracking.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
