@@ -31,13 +31,17 @@
  *   --csv PATH         also write a CSV (default reports/eligible-offer-items.csv)
  *   --json PATH        also write the raw joined data as JSON
  *   --max N            stop after N eligible listings (for a quick look)
+ *   --concurrency N    GetSellerList pages fetched in parallel (default 6)
+ *   --days N           GetSellerList end-time window for --source watchers
+ *                      (default 40; GTC listings renew every 30 days, so 40
+ *                      covers the whole store)
  *
  * --source watchers is a stand-in that needs only the Trading API token we
- * already have: it walks GetMyeBaySelling sorted by watch count and keeps
- * active fixed-price listings that have >= 1 watcher and stock available. That
- * is the same "interested buyer" signal eBay uses, so the list is close, but it
- * is an approximation: it cannot see abandoned-cart buyers, and it does not
- * know about eBay's other exclusions (multi-variation listings, listings that
+ * already have: it pages GetSellerList over the whole store and keeps active
+ * GTC listings that have >= 1 watcher and stock available. Watchers are the
+ * same "interested buyer" signal eBay uses, so the list is close, but it is an
+ * approximation: it cannot see abandoned-cart buyers, and it does not know
+ * about eBay's other exclusions (multi-variation listings, listings that
  * already have an offer out, Inventory-API-managed listings). Use
  * --source negotiation once a sell.negotiation token exists.
  *
@@ -62,6 +66,8 @@ interface Options {
   csvPath: string | undefined;
   jsonPath: string | undefined;
   max: number | undefined;
+  days: number;
+  concurrency: number;
 }
 
 interface ItemDetail {
@@ -72,6 +78,7 @@ interface ItemDetail {
   quantityAvailable: number;
   watchCount: number;
   listingType: string;
+  site: string;
   bestOfferEnabled: boolean;
   sku: string;
   viewUrl: string;
@@ -86,6 +93,8 @@ function parseArgs(argv: string[]): Options {
     csvPath: "reports/eligible-offer-items.csv",
     jsonPath: undefined,
     max: undefined,
+    days: 40,
+    concurrency: 6,
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -128,6 +137,12 @@ function parseArgs(argv: string[]): Options {
         break;
       case "--max":
         opts.max = parseInt(next(), 10);
+        break;
+      case "--days":
+        opts.days = parseInt(next(), 10);
+        break;
+      case "--concurrency":
+        opts.concurrency = Math.max(1, parseInt(next(), 10));
         break;
       case "-h":
       case "--help":
@@ -247,6 +262,7 @@ async function fetchItemDetail(
     quantityAvailable: NaN,
     watchCount: NaN,
     listingType: "",
+    site: "",
     bestOfferEnabled: false,
     sku: "",
     viewUrl: `https://www.ebay.com/itm/${listingId}`,
@@ -273,120 +289,168 @@ async function fetchItemDetail(
     quantityAvailable: parseInt(findText(xml, "Quantity") ?? "NaN", 10),
     watchCount: parseInt(findText(xml, "WatchCount") ?? "NaN", 10),
     listingType: findText(xml, "ListingType") ?? "",
+    site: findText(xml, "Site") ?? "",
     bestOfferEnabled: (findText(xml, "BestOfferEnabled") ?? "").toLowerCase() === "true",
     sku: findText(xml, "SKU") ?? "",
     viewUrl: findText(xml, "ViewItemURL") ?? blank.viewUrl,
   };
 }
 
-const WATCHER_SCAN_SELECTOR = [
-  "ActiveList.PaginationResult.TotalNumberOfPages",
-  "ActiveList.PaginationResult.TotalNumberOfEntries",
-  "ActiveList.ItemArray.Item.ItemID",
-  "ActiveList.ItemArray.Item.Title",
-  "ActiveList.ItemArray.Item.ListingType",
-  "ActiveList.ItemArray.Item.WatchCount",
-  "ActiveList.ItemArray.Item.Quantity",
-  "ActiveList.ItemArray.Item.QuantityAvailable",
-  "ActiveList.ItemArray.Item.SKU",
-  "ActiveList.ItemArray.Item.SellingStatus.CurrentPrice",
-  "ActiveList.ItemArray.Item.ListingDetails.ViewItemURL",
-].join(",");
-
-const WATCHER_PAGE_SIZE = 200; // GetMyeBaySelling max entries per page
+const SELLER_LIST_PAGE_SIZE = 200; // GetSellerList max entries per page
+const SELLER_LIST_DELAY_MS = 200;
 
 /**
- * Trading-API stand-in for findEligibleItems: active listings sorted by watch
- * count descending, stopping at the first listing with no watchers. Only pages
- * far enough to cover the watched listings, not the whole store.
+ * Trading-API stand-in for findEligibleItems: every active listing with at
+ * least one watcher, via GetSellerList paged over the listings whose end time
+ * falls in the next `days` days (GTC listings renew every 30, so a 40-day
+ * window covers the whole store).
+ *
+ * GetSellerList rather than GetMyeBaySelling on purpose: GetMyeBaySelling's
+ * ActiveList silently caps at 25,000 entries, and it applies its sort *within*
+ * that cap -- on this store (~96k active listings) a watch-count-descending
+ * scan therefore only sees about a quarter of the listings and undercounts by
+ * roughly the same factor. GetSellerList has no such cap, at the cost of paging
+ * the entire store (~480 calls for 96k listings) instead of stopping early.
  */
-async function scanWatchedListings(token: string, opts: Options): Promise<ItemDetail[]> {
+/** Parse one GetSellerList page into the watched-listing rows it contains. */
+function parseSellerListPage(xml: string): { rows: ItemDetail[]; items: number } {
   const rows: ItemDetail[] = [];
-  let pageNumber = 1;
+  const blocks = findBlocks(xml, "Item");
 
-  for (;;) {
-    const xmlBody = `<?xml version="1.0" encoding="utf-8"?>
-<GetMyeBaySellingRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-  <ActiveList>
-    <Include>true</Include>
-    <Sort>WatchCountDescending</Sort>
-    <Pagination>
-      <EntriesPerPage>${WATCHER_PAGE_SIZE}</EntriesPerPage>
-      <PageNumber>${pageNumber}</PageNumber>
-    </Pagination>
-  </ActiveList>
-</GetMyeBaySellingRequest>`;
+  for (const block of blocks) {
+    const watchCount = parseInt(findText(block, "WatchCount") ?? "0", 10) || 0;
+    if (watchCount === 0) continue;
 
-    const resp = await fetch(TRADING_API, {
-      method: "POST",
-      headers: {
-        "Content-Type": "text/xml",
-        "X-EBAY-API-SITEID": String(opts.siteId),
-        "X-EBAY-API-COMPATIBILITY-LEVEL": "1193",
-        "X-EBAY-API-CALL-NAME": "GetMyeBaySelling",
-        "X-EBAY-API-IAF-TOKEN": token,
-        "X-EBAY-API-OUTPUT-SELECTOR": WATCHER_SCAN_SELECTOR,
-      },
-      body: xmlBody,
+    // Coarse granularity omits ListingType; GTC is fixed-price only (auctions
+    // cannot run as GTC), so it stands in for the fixed-price filter.
+    if ((findText(block, "ListingDuration") ?? "") !== "GTC") continue;
+
+    const quantity = parseInt(findText(block, "Quantity") ?? "NaN", 10);
+    const sold = parseInt(findText(block, "QuantitySold") ?? "0", 10) || 0;
+    const available = Number.isFinite(quantity) ? quantity - sold : NaN;
+    if (Number.isFinite(available) && available <= 0) continue;
+
+    const priceMatch = block.match(
+      /<(?:\w+:)?CurrentPrice[^>]*currencyID="([^"]*)"[^>]*>([\s\S]*?)<\/(?:\w+:)?CurrentPrice>/
+    );
+    const listingId = findText(block, "ItemID") ?? "";
+
+    rows.push({
+      listingId,
+      title: unescapeXml((findText(block, "Title") ?? "").trim()),
+      price: parseFloat(priceMatch?.[2] ?? "NaN"),
+      currency: priceMatch?.[1] ?? "",
+      quantityAvailable: available,
+      watchCount,
+      listingType: "FixedPriceItem", // implied by GTC, see above
+      site: findText(block, "Site") ?? "",
+      bestOfferEnabled: false, // not returned by this call
+      sku: findText(block, "SKU") ?? "",
+      viewUrl: findText(block, "ViewItemURL") ?? `https://www.ebay.com/itm/${listingId}`,
     });
-
-    const xml = await resp.text();
-    const ack = findText(xml, "Ack") ?? "Unknown";
-    if (ack !== "Success" && ack !== "Warning") {
-      console.error(`GetMyeBaySelling page ${pageNumber}: Ack=${ack}`);
-      for (const err of findErrors(xml)) console.error(`  ${err.severity}: ${err.short} -- ${err.long}`);
-      process.exit(1);
-    }
-
-    if (pageNumber === 1) {
-      const totalEntries = findText(xml, "TotalNumberOfEntries") ?? "?";
-      console.error(`active listings reported: ${totalEntries} (paging by watch count, high to low)`);
-    }
-
-    const blocks = findBlocks(xml, "Item");
-    if (blocks.length === 0) return rows;
-
-    let sawZeroWatchers = false;
-    for (const block of blocks) {
-      const watchCount = parseInt(findText(block, "WatchCount") ?? "0", 10) || 0;
-      if (watchCount === 0) {
-        sawZeroWatchers = true;
-        break; // sorted descending: everything after this has no watchers
-      }
-      const listingType = findText(block, "ListingType") ?? "";
-      const quantity = parseInt(findText(block, "Quantity") ?? "NaN", 10);
-      const availableRaw = findText(block, "QuantityAvailable");
-      const available = availableRaw === undefined ? quantity : parseInt(availableRaw, 10);
-      const priceMatch = block.match(
-        /<(?:\w+:)?CurrentPrice[^>]*currencyID="([^"]*)"[^>]*>([\s\S]*?)<\/(?:\w+:)?CurrentPrice>/
-      );
-      const listingId = findText(block, "ItemID") ?? "";
-
-      // Offers only make sense on a fixed-price listing that can still be bought.
-      if (listingType !== "FixedPriceItem") continue;
-      if (Number.isFinite(available) && available <= 0) continue;
-
-      rows.push({
-        listingId,
-        title: unescapeXml((findText(block, "Title") ?? "").trim()),
-        price: parseFloat(priceMatch?.[2] ?? "NaN"),
-        currency: priceMatch?.[1] ?? "",
-        quantityAvailable: available,
-        watchCount,
-        listingType,
-        bestOfferEnabled: false, // not returned by this call
-        sku: findText(block, "SKU") ?? "",
-        viewUrl: findText(block, "ViewItemURL") ?? `https://www.ebay.com/itm/${listingId}`,
-      });
-
-      if (opts.max !== undefined && rows.length >= opts.max) return rows;
-    }
-
-    if (sawZeroWatchers) return rows;
-    console.error(`  page ${pageNumber}: ${rows.length} watched listing(s) so far`);
-    pageNumber++;
-    await sleep(250);
   }
+
+  return { rows, items: blocks.length };
+}
+
+/** One GetSellerList page of the seller's active listings, with watch counts. */
+async function fetchSellerListPage(
+  token: string,
+  opts: Options,
+  from: Date,
+  to: Date,
+  pageNumber: number
+): Promise<{ xml: string; total: number }> {
+  const xmlBody = `<?xml version="1.0" encoding="utf-8"?>
+<GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <EndTimeFrom>${from.toISOString()}</EndTimeFrom>
+  <EndTimeTo>${to.toISOString()}</EndTimeTo>
+  <IncludeWatchCount>true</IncludeWatchCount>
+  <GranularityLevel>Coarse</GranularityLevel>
+  <Pagination>
+    <EntriesPerPage>${SELLER_LIST_PAGE_SIZE}</EntriesPerPage>
+    <PageNumber>${pageNumber}</PageNumber>
+  </Pagination>
+</GetSellerListRequest>`;
+
+  const resp = await fetch(TRADING_API, {
+    method: "POST",
+    headers: {
+      "Content-Type": "text/xml",
+      "X-EBAY-API-SITEID": String(opts.siteId),
+      "X-EBAY-API-COMPATIBILITY-LEVEL": "1193",
+      "X-EBAY-API-CALL-NAME": "GetSellerList",
+      "X-EBAY-API-IAF-TOKEN": token,
+    },
+    body: xmlBody,
+  });
+
+  const xml = await resp.text();
+  const ack = findText(xml, "Ack") ?? "Unknown";
+  if (ack !== "Success" && ack !== "Warning") {
+    console.error(`GetSellerList page ${pageNumber}: Ack=${ack}`);
+    for (const err of findErrors(xml)) console.error(`  ${err.severity}: ${err.short} -- ${err.long}`);
+    process.exit(1);
+  }
+
+  return { xml, total: parseInt(findText(xml, "TotalNumberOfEntries") ?? "0", 10) || 0 };
+}
+
+/**
+ * Trading-API stand-in for findEligibleItems: every active listing with at
+ * least one watcher, via GetSellerList paged over the listings whose end time
+ * falls in the next `days` days (GTC listings renew every 30, so a 40-day
+ * window covers the whole store).
+ *
+ * GetSellerList rather than GetMyeBaySelling on purpose: GetMyeBaySelling's
+ * ActiveList silently caps at 25,000 entries and applies its sort *within* that
+ * cap, so on this store (~96k active listings) a watch-count-descending scan
+ * sees only a quarter of the listings and undercounts by about the same factor.
+ * GetSellerList has no such cap, at the cost of paging the whole store -- ~480
+ * calls of ~750KB each, which is why pages are fetched --concurrency at a time.
+ */
+async function scanWatchedListings(
+  token: string,
+  opts: Options
+): Promise<{ rows: ItemDetail[]; scanned: number; total: number }> {
+  const from = new Date();
+  const to = new Date(from.getTime() + opts.days * 24 * 60 * 60 * 1000);
+
+  const first = await fetchSellerListPage(token, opts, from, to, 1);
+  const total = first.total;
+  const totalPages = Math.max(1, Math.ceil(total / SELLER_LIST_PAGE_SIZE));
+  console.error(
+    `${total} active listing(s) ending within ${opts.days} days; ` +
+      `${totalPages} page(s) of ${SELLER_LIST_PAGE_SIZE}, ${opts.concurrency} at a time`
+  );
+
+  const firstPage = parseSellerListPage(first.xml);
+  const rows: ItemDetail[] = [...firstPage.rows];
+  let scanned = firstPage.items;
+
+  for (let page = 2; page <= totalPages; page += opts.concurrency) {
+    const batch = [];
+    for (let i = 0; i < opts.concurrency && page + i <= totalPages; i++) {
+      batch.push(fetchSellerListPage(token, opts, from, to, page + i));
+    }
+    for (const settled of await Promise.all(batch)) {
+      const parsed = parseSellerListPage(settled.xml);
+      rows.push(...parsed.rows);
+      scanned += parsed.items;
+    }
+
+    if (opts.max !== undefined && rows.length >= opts.max) {
+      return { rows: rows.slice(0, opts.max), scanned, total };
+    }
+    const done = Math.min(page + opts.concurrency - 1, totalPages);
+    if (done % 50 < opts.concurrency) {
+      console.error(`  page ${done}/${totalPages}: ${scanned} scanned, ${rows.length} watched so far`);
+    }
+    await sleep(SELLER_LIST_DELAY_MS);
+  }
+
+  rows.sort((a, b) => b.watchCount - a.watchCount);
+  return { rows, scanned, total };
 }
 
 function csvCell(value: string | number | boolean): string {
@@ -397,12 +461,12 @@ function csvCell(value: string | number | boolean): string {
 function writeCsv(path: string, rows: ItemDetail[], details: boolean, bestOffer: boolean): void {
   mkdirSync(dirname(path), { recursive: true });
   const header = details
-    ? ["ListingID", "Title", "Price", "Currency", "WatchCount", "QuantityAvailable", "ListingType", ...(bestOffer ? ["BestOfferEnabled"] : []), "SKU", "URL"]
+    ? ["ListingID", "Title", "Price", "Currency", "WatchCount", "QuantityAvailable", "ListingType", "Site", ...(bestOffer ? ["BestOfferEnabled"] : []), "SKU", "URL"]
     : ["ListingID", "URL"];
   const lines = [header.join(",")];
   for (const r of rows) {
     const cells: Array<string | number | boolean> = details
-      ? [r.listingId, r.title, r.price, r.currency, r.watchCount, r.quantityAvailable, r.listingType, ...(bestOffer ? [r.bestOfferEnabled] : []), r.sku, r.viewUrl]
+      ? [r.listingId, r.title, r.price, r.currency, r.watchCount, r.quantityAvailable, r.listingType, r.site, ...(bestOffer ? [r.bestOfferEnabled] : []), r.sku, r.viewUrl]
       : [r.listingId, r.viewUrl];
     lines.push(cells.map(csvCell).join(","));
   }
@@ -424,7 +488,9 @@ async function main() {
       );
       process.exit(1);
     }
-    rows = await scanWatchedListings(tradingToken, opts);
+    const scan = await scanWatchedListings(tradingToken, opts);
+    rows = scan.rows;
+    console.error(`scanned ${scan.scanned} of ${scan.total} active listing(s)`);
     if (rows.length === 0) {
       console.log("No active fixed-price listing currently has a watcher.");
       return;
@@ -454,6 +520,7 @@ async function main() {
       quantityAvailable: NaN,
       watchCount: NaN,
       listingType: "",
+      site: "",
       bestOfferEnabled: false,
       sku: "",
       viewUrl: `https://www.ebay.com/itm/${listingId}`,
