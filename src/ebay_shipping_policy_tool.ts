@@ -139,6 +139,100 @@ function getToken(): string {
   return token;
 }
 
+/** Fetch every fulfillment policy for a marketplace via the Account API
+ * (GET /sell/account/v1/fulfillment_policy) -- the full representation for
+ * each policy, including shippingOptions/rateTableId, not just id+name. */
+async function getAllFulfillmentPolicies(env: Env, marketplaceId: string): Promise<any[]> {
+  const host = ACCOUNT_API_HOST[env];
+  const url = `${host}/sell/account/v1/fulfillment_policy?marketplace_id=${marketplaceId}`;
+  const resp = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${getToken()}`,
+      Accept: "application/json",
+    },
+  });
+  if (!resp.ok) {
+    const body = await resp.text();
+    console.error(`ERROR ${resp.status} fetching policies:\n${body}`);
+    process.exit(1);
+  }
+  const data = (await resp.json()) as { fulfillmentPolicies?: any[] };
+  return data.fulfillmentPolicies ?? [];
+}
+
+/** PUT a full fulfillment policy body back (Account API updateFulfillmentPolicy). */
+async function updateFulfillmentPolicy(
+  env: Env,
+  policyId: string,
+  body: unknown
+): Promise<{ ok: boolean; status: number; text: string }> {
+  const host = ACCOUNT_API_HOST[env];
+  const url = `${host}/sell/account/v1/fulfillment_policy/${policyId}`;
+  const resp = await fetch(url, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${getToken()}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await resp.text();
+  return { ok: resp.ok, status: resp.status, text };
+}
+
+/** Swap a rate table (e.g. an international-shipping rate table like "EU -
+ * Expedited") for another (e.g. "EU - Customs + Mexico") across every
+ * fulfillment policy on the account that currently references it. Reads the
+ * live policy list from the Account API, edits only the matching
+ * shippingOptions[].rateTableId field in each affected policy, and PUTs the
+ * full policy back -- everything else about the policy (shipping services,
+ * costs, handling time, regions) is left untouched. */
+async function swapRateTable(
+  env: Env,
+  marketplaceId: string,
+  fromRateTableId: string,
+  toRateTableId: string,
+  dryRun: boolean
+) {
+  console.log(`Fetching fulfillment policies for ${marketplaceId}...`);
+  const policies = await getAllFulfillmentPolicies(env, marketplaceId);
+  const toUpdate = policies.filter((p) =>
+    (p.shippingOptions ?? []).some((o: any) => o.rateTableId === fromRateTableId)
+  );
+
+  console.log(`${policies.length} total polic(y/ies); ${toUpdate.length} use rate table ${fromRateTableId}.\n`);
+
+  const results: Array<{ name: string; id: string; ok: boolean }> = [];
+  for (const p of toUpdate) {
+    const updated = JSON.parse(JSON.stringify(p));
+    for (const opt of updated.shippingOptions ?? []) {
+      if (opt.rateTableId === fromRateTableId) opt.rateTableId = toRateTableId;
+    }
+    const { fulfillmentPolicyId, ...body } = updated;
+
+    if (dryRun) {
+      console.log(`[DRY RUN] Would update "${p.name}" (${fulfillmentPolicyId}) -> rateTableId ${toRateTableId}`);
+      continue;
+    }
+
+    const result = await updateFulfillmentPolicy(env, fulfillmentPolicyId, body);
+    console.log(`"${p.name}" (${fulfillmentPolicyId}): ${result.ok ? "OK" : `FAILED (${result.status})`}`);
+    if (!result.ok) console.log(`  ${result.text}`);
+    results.push({ name: p.name, id: fulfillmentPolicyId, ok: result.ok });
+    await sleep(PAGE_DELAY_MS);
+  }
+
+  if (!dryRun) {
+    const failed = results.filter((r) => !r.ok);
+    console.log(`\n${results.length - failed.length}/${results.length} polic(y/ies) updated successfully.`);
+    if (failed.length > 0) {
+      console.log(`Failed: ${failed.map((f) => `${f.name} (${f.id})`).join(", ")}`);
+      process.exit(1);
+    }
+  }
+}
+
 async function listPolicies(env: Env, marketplaceId: string) {
   const host = ACCOUNT_API_HOST[env];
   const url = `${host}/sell/account/v1/fulfillment_policy?marketplace_id=${marketplaceId}`;
@@ -828,7 +922,7 @@ async function migrateByPrice(
 
 interface ParsedArgs {
   sandbox: boolean;
-  command: "list-policies" | "check-access" | "revise-items" | "migrate-by-price" | "scan-policies";
+  command: "list-policies" | "check-access" | "revise-items" | "migrate-by-price" | "scan-policies" | "swap-rate-table";
   marketplace: string;
   itemIds: string[];
   policyId?: string;
@@ -840,6 +934,8 @@ interface ParsedArgs {
   itemsFile?: string;
   rangesFile?: string;
   nameContains?: string;
+  fromRateTableId?: string;
+  toRateTableId?: string;
 }
 
 function die(msg: string): never {
@@ -862,6 +958,8 @@ function parseArgs(argv: string[]): ParsedArgs {
     itemsFile: undefined,
     rangesFile: undefined,
     nameContains: undefined,
+    fromRateTableId: undefined,
+    toRateTableId: undefined,
   };
 
   const rest: string[] = [];
@@ -879,10 +977,11 @@ function parseArgs(argv: string[]): ParsedArgs {
     command !== "check-access" &&
     command !== "revise-items" &&
     command !== "migrate-by-price" &&
-    command !== "scan-policies"
+    command !== "scan-policies" &&
+    command !== "swap-rate-table"
   ) {
     die(
-      "Usage: ebay_shipping_policy_tool.ts [--sandbox] <list-policies|check-access|revise-items|migrate-by-price|scan-policies> [options]"
+      "Usage: ebay_shipping_policy_tool.ts [--sandbox] <list-policies|check-access|revise-items|migrate-by-price|scan-policies|swap-rate-table> [options]"
     );
   }
   args.command = command;
@@ -933,6 +1032,12 @@ function parseArgs(argv: string[]): ParsedArgs {
       case "--name-contains":
         args.nameContains = rest[++i];
         break;
+      case "--from-rate-table-id":
+        args.fromRateTableId = rest[++i];
+        break;
+      case "--to-rate-table-id":
+        args.toRateTableId = rest[++i];
+        break;
       default:
         die(`Unknown option: ${a}`);
     }
@@ -950,6 +1055,10 @@ function parseArgs(argv: string[]): ParsedArgs {
       die("--from-policy-id (one or more ids) is required for migrate-by-price (unless --apply)");
     }
     if (!args.reportOut) die("--report-out is required for migrate-by-price");
+  }
+  if (args.command === "swap-rate-table") {
+    if (!args.fromRateTableId) die("--from-rate-table-id is required for swap-rate-table");
+    if (!args.toRateTableId) die("--to-rate-table-id is required for swap-rate-table");
   }
 
   return args;
@@ -981,6 +1090,8 @@ async function main() {
     await migrateByPrice(env, args.siteId, args.fromPolicyIds, args.reportOut!, args.apply, args.itemsFile, args.rangesFile);
   } else if (args.command === "scan-policies") {
     await scanPolicies(env, args.siteId, args.nameContains);
+  } else if (args.command === "swap-rate-table") {
+    await swapRateTable(env, args.marketplace, args.fromRateTableId!, args.toRateTableId!, args.dryRun);
   }
 }
 
