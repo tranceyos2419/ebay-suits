@@ -154,8 +154,11 @@ function accountsToSearch(explicit?: string): { name: string; token: string }[] 
     }
     return [{ name: explicit, token }];
   }
+  // Only the seller accounts themselves -- the "-oauth" / "-app" / "-refresh"
+  // entries are REST credentials for those same sellers (2-hour OAuth tokens
+  // that are usually expired), and GetOrders on one of them aborts the run.
   return Object.entries(creds)
-    .filter(([, v]) => !!v.token)
+    .filter(([name, v]) => !!v.token && !/-(oauth|app|refresh)$/.test(name))
     .map(([name, v]) => ({ name, token: v.token! }));
 }
 
