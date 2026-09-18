@@ -11,9 +11,10 @@
  *               history (eBay's deduction on a returned-item refund)
  *
  * Usage:
- *   export EBAY_ACCESS_TOKEN=$(npx tsx src/get_token.ts jdm-direct-motors)
- *   npx tsx src/return_refund_report.ts [--days N] [--json]
+ *   npx tsx src/return_refund_report.ts --account <name> [--days N] [--json]
  */
+
+import { accountFromArgs, authnAuthToken } from "./ebay_auth.ts";
 
 const SEARCH = "https://api.ebay.com/post-order/v2/return/search";
 const DETAIL = "https://api.ebay.com/post-order/v2/return";
@@ -87,7 +88,7 @@ function figuresFor(detail: any): Figures {
 }
 
 async function main() {
-  const argv = process.argv.slice(2);
+  const { account, rest: argv } = accountFromArgs(process.argv.slice(2));
   let days = 45;
   let json = false;
   for (let i = 0; i < argv.length; i++) {
@@ -99,14 +100,7 @@ async function main() {
     }
   }
 
-  const token = process.env.EBAY_ACCESS_TOKEN;
-  if (!token) {
-    console.error(
-      "ERROR: set EBAY_ACCESS_TOKEN first, e.g.\n" +
-        "  export EBAY_ACCESS_TOKEN=$(npx tsx src/get_token.ts jdm-direct-motors)"
-    );
-    process.exit(1);
-  }
+  const token = authnAuthToken(account);
 
   const from = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
   const ids: string[] = [];

@@ -17,23 +17,18 @@
  *   npx tsx src/find_return_by_tracking.ts <tracking-number> --account jdm-direct-motors
  *   npx tsx src/find_return_by_tracking.ts --account jdm-direct-motors --list --days 365
  *
- * Auth: pass --account <name> to read credentials.json, or set
- * EBAY_ACCESS_TOKEN yourself. The Auth'n'Auth tokens in credentials.json work
- * here -- the Post-Order API takes them as `Authorization: TOKEN <token>`.
+ * Auth: --account <name> (required) -- uses that account's Auth'n'Auth token,
+ * which the Post-Order API takes as `Authorization: TOKEN <token>`.
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { accountFromArgs, authnAuthToken } from "./ebay_auth.ts";
 
-const CREDS_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "credentials.json");
 const BASE = "https://api.ebay.com/post-order/v2";
 const PAGE_LIMIT = 50;
 const CONCURRENCY = 5;
 
 interface Options {
   tracking?: string;
-  account?: string;
   marketplace: string;
   list: boolean;
   days: number;
@@ -64,8 +59,7 @@ function parseArgs(argv: string[]): Options {
   const opts: Options = { marketplace: "EBAY_US", list: false, days: 730 };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === "--account") opts.account = argv[++i];
-    else if (a === "--marketplace") opts.marketplace = argv[++i];
+    if (a === "--marketplace") opts.marketplace = argv[++i];
     else if (a === "--list") opts.list = true;
     else if (a === "--days") {
       opts.days = Number(argv[++i]);
@@ -91,28 +85,6 @@ function parseArgs(argv: string[]): Options {
     process.exit(1);
   }
   return opts;
-}
-
-function tokenFor(account?: string): string {
-  const fromEnv = process.env.EBAY_ACCESS_TOKEN;
-  if (!account) {
-    if (fromEnv) return fromEnv;
-    console.error("ERROR: pass --account <name>, or set EBAY_ACCESS_TOKEN.");
-    process.exit(1);
-  }
-  if (!existsSync(CREDS_PATH)) {
-    console.error(`ERROR: no credentials.json found at ${CREDS_PATH}`);
-    process.exit(1);
-  }
-  const creds: Record<string, { token?: string }> = JSON.parse(readFileSync(CREDS_PATH, "utf8"));
-  const token = creds[account]?.token;
-  if (!token) {
-    console.error(
-      `ERROR: no usable token for '${account}'. Known accounts: ${Object.keys(creds).join(", ")}`
-    );
-    process.exit(1);
-  }
-  return token;
 }
 
 async function getJson(url: string, token: string): Promise<any> {
@@ -259,14 +231,15 @@ function describe(r: ReturnSummary, hits: TrackingHit[], rawMatch: boolean): str
 }
 
 async function main() {
-  const opts = parseArgs(process.argv.slice(2));
-  const token = tokenFor(opts.account);
+  const { account, rest } = accountFromArgs(process.argv.slice(2));
+  const opts = parseArgs(rest);
+  const token = authnAuthToken(account);
   process.env.EBAY_MARKETPLACE = opts.marketplace;
   const target = opts.tracking ? normalize(opts.tracking) : undefined;
 
   const returns = await fetchAllReturns(token, opts.marketplace, opts.days);
   console.error(
-    `Scanning ${returns.length} returns on ${opts.account ?? "this account"} (last ${opts.days} days)...`
+    `Scanning ${returns.length} returns on ${account} (last ${opts.days} days)...`
   );
 
   const scanned = await mapLimit(returns, async (r) => {

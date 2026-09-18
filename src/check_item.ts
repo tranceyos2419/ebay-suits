@@ -6,24 +6,21 @@
  * profile. Makes no changes.
  *
  * Usage:
- *   export EBAY_ACCESS_TOKEN="your-token"
- *   npx tsx check_item.ts 397429202355
+ *   npx tsx src/check_item.ts --account jdm-direct-motors 397429202355
  */
 
 import { findText, findErrors } from "./xml_util.ts";
+import { accountFromArgs, authnAuthToken } from "./ebay_auth.ts";
 
 async function main() {
-  const itemId = process.argv[2];
-  if (!itemId || process.argv.length !== 3) {
-    console.error("Usage: npx tsx check_item.ts <ITEM_ID>");
+  const { account, rest } = accountFromArgs(process.argv.slice(2));
+  const itemId = rest[0];
+  if (!itemId || rest.length !== 1) {
+    console.error("Usage: npx tsx src/check_item.ts --account <name> <ITEM_ID>");
     process.exit(1);
   }
 
-  const token = process.env.EBAY_ACCESS_TOKEN;
-  if (!token) {
-    console.error('ERROR: set EBAY_ACCESS_TOKEN first, e.g.\n  export EBAY_ACCESS_TOKEN="your-token"');
-    process.exit(1);
-  }
+  const token = authnAuthToken(account);
 
   const xmlBody = `<?xml version="1.0" encoding="utf-8"?>
 <GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">

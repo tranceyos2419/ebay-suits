@@ -4,12 +4,13 @@
  * Post-Order API (Return Management).
  *
  * Usage:
- *   export EBAY_ACCESS_TOKEN=$(npx tsx src/get_token.ts jdm-direct-motors)
- *   npx tsx src/get_returns.ts [--days N] [--state OPEN|CLOSED|ALL] [--json]
+ *   npx tsx src/get_returns.ts --account <name> [--days N] [--state OPEN|CLOSED|ALL] [--json]
  *
- * The Auth'n'Auth tokens in credentials.json work here -- the Post-Order API
- * accepts them via the `Authorization: TOKEN <token>` header.
+ * Uses the account's Auth'n'Auth token -- the Post-Order API accepts it via
+ * the `Authorization: TOKEN <token>` header.
  */
+
+import { accountFromArgs, authnAuthToken } from "./ebay_auth.ts";
 
 const ENDPOINT = "https://api.ebay.com/post-order/v2/return/search";
 
@@ -56,16 +57,9 @@ function money(m: any): string {
 }
 
 async function main() {
-  const args = parseArgs(process.argv.slice(2));
-
-  const token = process.env.EBAY_ACCESS_TOKEN;
-  if (!token) {
-    console.error(
-      "ERROR: set EBAY_ACCESS_TOKEN first, e.g.\n" +
-        "  export EBAY_ACCESS_TOKEN=$(npx tsx src/get_token.ts jdm-direct-motors)"
-    );
-    process.exit(1);
-  }
+  const { account, rest } = accountFromArgs(process.argv.slice(2));
+  const args = parseArgs(rest);
+  const token = authnAuthToken(account);
 
   const from = new Date(Date.now() - args.days * 24 * 60 * 60 * 1000);
 

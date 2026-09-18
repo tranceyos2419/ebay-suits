@@ -4,25 +4,21 @@
  * listing via the Trading API's ReviseItem call.
  *
  * Usage:
- *   export EBAY_ACCESS_TOKEN="your-token"
- *   npx tsx revise_item_price.ts <ITEM_ID> <NEW_PRICE>
+ *   npx tsx src/revise_item_price.ts --account <name> <ITEM_ID> <NEW_PRICE>
  */
 
 import { findText, findErrors } from "./xml_util.ts";
+import { accountFromArgs, authnAuthToken } from "./ebay_auth.ts";
 
 async function main() {
-  const itemId = process.argv[2];
-  const newPrice = process.argv[3];
-  if (!itemId || !newPrice || process.argv.length !== 4) {
-    console.error("Usage: npx tsx revise_item_price.ts <ITEM_ID> <NEW_PRICE>");
+  const { account, rest } = accountFromArgs(process.argv.slice(2));
+  const [itemId, newPrice] = rest;
+  if (!itemId || !newPrice || rest.length !== 2) {
+    console.error("Usage: npx tsx src/revise_item_price.ts --account <name> <ITEM_ID> <NEW_PRICE>");
     process.exit(1);
   }
 
-  const token = process.env.EBAY_ACCESS_TOKEN;
-  if (!token) {
-    console.error('ERROR: set EBAY_ACCESS_TOKEN first, e.g.\n  export EBAY_ACCESS_TOKEN="your-token"');
-    process.exit(1);
-  }
+  const token = authnAuthToken(account);
 
   const xmlBody = `<?xml version="1.0" encoding="utf-8"?>
 <ReviseItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">

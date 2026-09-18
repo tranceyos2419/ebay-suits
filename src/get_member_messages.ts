@@ -4,11 +4,11 @@
  * Trading API's GetMemberMessages call.
  *
  * Usage:
- *   export EBAY_ACCESS_TOKEN="your-token"
- *   npx tsx get_member_messages.ts [COUNT]
+ *   npx tsx src/get_member_messages.ts --account <name> [COUNT]
  */
 
 import { findText, findErrors } from "./xml_util.ts";
+import { accountFromArgs, authnAuthToken } from "./ebay_auth.ts";
 
 function findAll(xml: string, tag: string): string[] {
   const re = new RegExp(`<(?:\\w+:)?${tag}[^>]*>([\\s\\S]*?)</(?:\\w+:)?${tag}>`, "g");
@@ -19,13 +19,10 @@ function findAll(xml: string, tag: string): string[] {
 }
 
 async function main() {
-  const count = parseInt(process.argv[2] ?? "3", 10);
+  const { account, rest } = accountFromArgs(process.argv.slice(2));
+  const count = parseInt(rest[0] ?? "3", 10);
 
-  const token = process.env.EBAY_ACCESS_TOKEN;
-  if (!token) {
-    console.error('ERROR: set EBAY_ACCESS_TOKEN first, e.g.\n  export EBAY_ACCESS_TOKEN="your-token"');
-    process.exit(1);
-  }
+  const token = authnAuthToken(account);
 
   const now = new Date();
   const start = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000); // last 30 days

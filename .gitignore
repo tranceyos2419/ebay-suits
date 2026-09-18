@@ -1,4 +1,4 @@
 node_modules
-credentials.json
+credentials*
 .DS_Store
 reports/

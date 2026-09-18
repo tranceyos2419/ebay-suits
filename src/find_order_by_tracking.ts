@@ -20,19 +20,13 @@
  *   npx tsx src/find_order_by_tracking.ts <tracking-number> --from 2026-06-20 --to 2026-08-10
  *   npx tsx src/find_order_by_tracking.ts <tracking-number> --account jdm-direct-motors --month 2026-07
  *
- * With no --account, every account in credentials.json is searched.
- *
- * Auth: pass --account <name> to read credentials.json, or set
- * EBAY_ACCESS_TOKEN yourself (Auth'n'Auth token -- Trading API takes it via
- * the X-EBAY-API-IAF-TOKEN header, same as weekly_revenue.ts).
+ * With no --account, every account in credentials.json is searched (each
+ * with its own Auth'n'Auth token, via src/ebay_auth.ts).
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
 import { findText, findErrors, findBlocks } from "./xml_util.ts";
+import { accountNames, authnAuthToken, useAccount } from "./ebay_auth.ts";
 
-const CREDS_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "credentials.json");
 const API = "https://api.ebay.com/ws/api.dll";
 const CHUNK_DAYS = 29;
 
@@ -140,26 +134,8 @@ function parseArgs(argv: string[]): Options {
 }
 
 function accountsToSearch(explicit?: string): { name: string; token: string }[] {
-  if (!existsSync(CREDS_PATH)) {
-    if (process.env.EBAY_ACCESS_TOKEN) return [{ name: "(env token)", token: process.env.EBAY_ACCESS_TOKEN }];
-    console.error(`ERROR: no credentials.json found at ${CREDS_PATH}, and no EBAY_ACCESS_TOKEN set.`);
-    process.exit(1);
-  }
-  const creds: Record<string, { token?: string }> = JSON.parse(readFileSync(CREDS_PATH, "utf8"));
-  if (explicit) {
-    const token = creds[explicit]?.token;
-    if (!token) {
-      console.error(`ERROR: no usable token for '${explicit}'. Known accounts: ${Object.keys(creds).join(", ")}`);
-      process.exit(1);
-    }
-    return [{ name: explicit, token }];
-  }
-  // Only the seller accounts themselves -- the "-oauth" / "-app" / "-refresh"
-  // entries are REST credentials for those same sellers (2-hour OAuth tokens
-  // that are usually expired), and GetOrders on one of them aborts the run.
-  return Object.entries(creds)
-    .filter(([name, v]) => !!v.token && !/-(oauth|app|refresh)$/.test(name))
-    .map(([name, v]) => ({ name, token: v.token! }));
+  const names = explicit ? [useAccount(explicit)] : accountNames();
+  return names.map((name) => ({ name, token: authnAuthToken(name) }));
 }
 
 async function getOrdersPage(token: string, from: Date, to: Date, page: number): Promise<{ xml: string; more: boolean }> {

@@ -8,40 +8,33 @@
  *
  * Auth
  * ----
- * This script expects a User OAuth access token in the environment variable
- * EBAY_ACCESS_TOKEN. Get one from:
- *   developer.ebay.com -> My Account -> Application Keys -> your app -> "User Tokens"
- *   tab -> select scopes (sell.account, sell.inventory) -> "Sign in to Production"
- *   (or Sandbox) -> approve -> copy the Access Token shown.
- *
- * That token is short-lived (~2 hrs). There's also a Refresh Token shown at the
- * same time, valid ~18 months, which you can use to mint new access tokens
- * without logging in again (see refresh_token.ts).
- *
- * NEVER commit your token or paste it into shared/public places. Treat it like
- * a password.
+ * Every command needs --account <name>; tokens come from src/ebay_auth.ts:
+ *   - Account API (list-policies, swap-rate-table): an OAuth user token with
+ *     scope sell.account, refreshed automatically. The account needs an
+ *     OAuth sign-in first (src/ebay_login.ts).
+ *   - Trading API (everything else): the account's Auth'n'Auth token.
+ * With --sandbox, credentials.json isn't used (it holds Production tokens):
+ * put a Sandbox user token in EBAY_SANDBOX_TOKEN instead of --account.
  *
  * Usage
  * -----
- *   export EBAY_ACCESS_TOKEN="v^1.1#i^1#..."
- *
  *   # 1. See your policies and their IDs
- *   npx tsx ebay_shipping_policy_tool.ts list-policies
+ *   npx tsx src/ebay_shipping_policy_tool.ts --account jdm-direct-motors list-policies
  *
  *   # 2. Confirm you can read listings, and that an edit WOULD succeed, without
  *   #    changing anything (uses GetItem [read] + VerifyReviseItem [validate-only]).
- *   npx tsx ebay_shipping_policy_tool.ts check-access \
+ *   npx tsx src/ebay_shipping_policy_tool.ts --account jdm-direct-motors check-access \
  *       --item-ids 110123456789 110987654321 \
  *       --policy-id 123456789012
  *
  *   # 3. Apply a policy to specific listings (dry run first!)
- *   npx tsx ebay_shipping_policy_tool.ts revise-items \
+ *   npx tsx src/ebay_shipping_policy_tool.ts --account jdm-direct-motors revise-items \
  *       --policy-id 123456789012 \
  *       --item-ids 110123456789 110987654321 \
  *       --dry-run
  *
  *   # Then actually apply it:
- *   npx tsx ebay_shipping_policy_tool.ts revise-items \
+ *   npx tsx src/ebay_shipping_policy_tool.ts --account jdm-direct-motors revise-items \
  *       --policy-id 123456789012 \
  *       --item-ids 110123456789 110987654321
  *
@@ -63,7 +56,7 @@
  *   # scan for that part, which is capped at 25,000 active listings by
  *   # GetMyeBaySelling (see the NOTE above scanActiveListings in the source
  *   # for why that matters on a larger store).
- *   npx tsx ebay_shipping_policy_tool.ts migrate-by-price \
+ *   npx tsx src/ebay_shipping_policy_tool.ts --account jdm-direct-motors migrate-by-price \
  *       --from-policy-id 273300062012 272284104012 272285920012 \
  *       --report-out reports/copy-cleanup.csv \
  *       --items-file express_items.csv \
@@ -73,7 +66,7 @@
  *   #    MATCH are revised; NO_MATCH rows are always left alone). No need to
  *   #    repeat --from-policy-id here -- the source policy for each row is
  *   #    read back from the report itself.
- *   npx tsx ebay_shipping_policy_tool.ts migrate-by-price \
+ *   npx tsx src/ebay_shipping_policy_tool.ts --account jdm-direct-motors migrate-by-price \
  *       --report-out reports/copy-cleanup.csv \
  *       --apply
  *
@@ -85,10 +78,11 @@
  *   #    see the NOTE above scanActiveListings. Optional --name-contains
  *   #    filters the printed list (case-insensitive substring on the policy
  *   #    name); omit it to see everything found.
- *   npx tsx ebay_shipping_policy_tool.ts scan-policies --name-contains copy
+ *   npx tsx src/ebay_shipping_policy_tool.ts --account jdm-direct-motors scan-policies --name-contains copy
  *
  * Flags
  * -----
+ *   --account        Seller account in credentials.json (required unless --sandbox).
  *   --sandbox        Use eBay Sandbox endpoints instead of Production.
  *   --marketplace    Marketplace ID for the Account API (default EBAY_US).
  *   --site-id        Trading API SiteID (default 0 = US).
@@ -112,6 +106,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { findText, findErrors, findBlocks } from "./xml_util.ts";
+import { accountFromArgs, authnAuthToken, die as authDie, oauthToken } from "./ebay_auth.ts";
 
 type Env = "prod" | "sandbox";
 
@@ -126,17 +121,23 @@ const TRADING_API_HOST: Record<Env, string> = {
 
 const TRADING_API_COMPATIBILITY_LEVEL = "1193";
 
-function getToken(): string {
-  const token = process.env.EBAY_ACCESS_TOKEN;
-  if (!token) {
-    console.error(
-      "ERROR: EBAY_ACCESS_TOKEN environment variable is not set.\n" +
-        "Get a token from developer.ebay.com -> your app -> User Tokens tab, then:\n" +
-        '  export EBAY_ACCESS_TOKEN="..."'
-    );
-    process.exit(1);
-  }
-  return token;
+const ACCOUNT_API_SCOPE = "sell.account";
+
+/** Seller account from --account; set once in main(). */
+let account = "";
+
+function sandboxToken(): string {
+  return process.env.EBAY_SANDBOX_TOKEN ?? authDie("ERROR: --sandbox needs a Sandbox user token in EBAY_SANDBOX_TOKEN.");
+}
+
+/** OAuth user token for the Account API (REST). */
+async function accountApiToken(env: Env): Promise<string> {
+  return env === "sandbox" ? sandboxToken() : oauthToken(account, [ACCOUNT_API_SCOPE]);
+}
+
+/** Token for Trading API calls: the account's Auth'n'Auth token. */
+function tradingApiToken(env: Env): string {
+  return env === "sandbox" ? sandboxToken() : authnAuthToken(account);
 }
 
 /** Fetch every fulfillment policy for a marketplace via the Account API
@@ -147,7 +148,7 @@ async function getAllFulfillmentPolicies(env: Env, marketplaceId: string): Promi
   const url = `${host}/sell/account/v1/fulfillment_policy?marketplace_id=${marketplaceId}`;
   const resp = await fetch(url, {
     headers: {
-      Authorization: `Bearer ${getToken()}`,
+      Authorization: `Bearer ${await accountApiToken(env)}`,
       Accept: "application/json",
     },
   });
@@ -171,7 +172,7 @@ async function updateFulfillmentPolicy(
   const resp = await fetch(url, {
     method: "PUT",
     headers: {
-      Authorization: `Bearer ${getToken()}`,
+      Authorization: `Bearer ${await accountApiToken(env)}`,
       "Content-Type": "application/json",
       Accept: "application/json",
     },
@@ -238,7 +239,7 @@ async function listPolicies(env: Env, marketplaceId: string) {
   const url = `${host}/sell/account/v1/fulfillment_policy?marketplace_id=${marketplaceId}`;
   const resp = await fetch(url, {
     headers: {
-      Authorization: `Bearer ${getToken()}`,
+      Authorization: `Bearer ${await accountApiToken(env)}`,
       Accept: "application/json",
     },
   });
@@ -296,8 +297,7 @@ async function callTradingApi(
       "X-EBAY-API-SITEID": String(siteId),
       "X-EBAY-API-COMPATIBILITY-LEVEL": TRADING_API_COMPATIBILITY_LEVEL,
       "X-EBAY-API-CALL-NAME": callName,
-      // OAuth user token passed via IAF header for Trading API calls.
-      "X-EBAY-API-IAF-TOKEN": getToken(),
+      "X-EBAY-API-IAF-TOKEN": tradingApiToken(env),
       ...extraHeaders,
     },
     body: xmlBody,
@@ -981,7 +981,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     command !== "swap-rate-table"
   ) {
     die(
-      "Usage: ebay_shipping_policy_tool.ts [--sandbox] <list-policies|check-access|revise-items|migrate-by-price|scan-policies|swap-rate-table> [options]"
+      "Usage: ebay_shipping_policy_tool.ts (--account <name> | --sandbox) <list-policies|check-access|revise-items|migrate-by-price|scan-policies|swap-rate-table> [options]"
     );
   }
   args.command = command;
@@ -1065,7 +1065,10 @@ function parseArgs(argv: string[]): ParsedArgs {
 }
 
 async function main() {
-  const args = parseArgs(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  let rest = argv;
+  if (!argv.includes("--sandbox")) ({ account, rest } = accountFromArgs(argv));
+  const args = parseArgs(rest);
   const env: Env = args.sandbox ? "sandbox" : "prod";
 
   if (args.command === "list-policies") {

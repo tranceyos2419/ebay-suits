@@ -29,6 +29,8 @@ When adding new files, place them in the category folder they belong to rather t
 
 Before doing anything in this folder, make sure you know which eBay account the task applies to. If the user's message does not make it clear, ask which account to work on before proceeding.
 
+Once the account is known, pass it to every script with `--account <name>` (`jdm-direct-motors` or `love-of-japan`). Scripts get their tokens from `src/ebay_auth.ts`; do not export tokens into the shell. Check token expiry and OAuth scopes with `npx tsx src/ebay_auth.ts status`. An OAuth sign-in (`src/ebay_login.ts`) needs the user to sign in to eBay in their own browser, so ask them to run it.
+
 ## Interacting with eBay
 
 Default to using the eBay API for any interaction with eBay. Use another method, such as browser automation, only if the user specifies otherwise.

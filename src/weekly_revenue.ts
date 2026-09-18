@@ -5,13 +5,13 @@
  * compared and drilled into.
  *
  * Usage:
- *   export EBAY_ACCESS_TOKEN="your-token"
- *   npx tsx src/weekly_revenue.ts [WEEKS] [--json out.json]
+ *   npx tsx src/weekly_revenue.ts --account <name> [WEEKS] [--json out.json]
  *
  * WEEKS defaults to 8 (complete weeks back from the most recent Monday).
  */
 
 import { findText, findErrors, findBlocks } from "./xml_util.ts";
+import { accountFromArgs, authnAuthToken } from "./ebay_auth.ts";
 
 const API = "https://api.ebay.com/ws/api.dll";
 
@@ -114,15 +114,12 @@ function parseOrders(xml: string): Order[] {
 }
 
 async function main() {
-  const weeks = parseInt(process.argv[2] ?? "8", 10);
-  const jsonIdx = process.argv.indexOf("--json");
-  const jsonOut = jsonIdx > -1 ? process.argv[jsonIdx + 1] : undefined;
+  const { account, rest } = accountFromArgs(process.argv.slice(2));
+  const weeks = parseInt(rest[0] ?? "8", 10);
+  const jsonIdx = rest.indexOf("--json");
+  const jsonOut = jsonIdx > -1 ? rest[jsonIdx + 1] : undefined;
 
-  const token = process.env.EBAY_ACCESS_TOKEN;
-  if (!token) {
-    console.error('ERROR: set EBAY_ACCESS_TOKEN first, e.g.\n  export EBAY_ACCESS_TOKEN="your-token"');
-    process.exit(1);
-  }
+  const token = authnAuthToken(account);
 
   const now = new Date();
   // Most recent Monday 00:00 UTC (start of the in-progress week).

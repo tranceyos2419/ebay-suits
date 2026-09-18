@@ -9,18 +9,16 @@
  * It returns listing IDs only, so each one is optionally enriched with title /
  * price / watch count via the Trading API's GetItem (skip with --no-details).
  *
- * TOKENS -- two different ones, because these are two different APIs:
- *   EBAY_OAUTH_TOKEN     OAuth *user* access token with scope
- *                        https://api.ebay.com/oauth/api_scope/sell.negotiation
- *                        (REST call. An Auth'n'Auth token gets 403
- *                        "Insufficient permissions" here.)
- *   EBAY_ACCESS_TOKEN    Token for the Trading API GetItem enrichment -- the
- *                        Auth'n'Auth token in credentials.json works:
- *                          export EBAY_ACCESS_TOKEN=$(npx tsx src/get_token.ts jdm-direct-motors)
- *                        Falls back to EBAY_OAUTH_TOKEN if unset.
+ * TOKENS -- two different ones, because these are two different APIs; both
+ * come from src/ebay_auth.ts for the --account given:
+ *   findEligibleItems    OAuth user token with scope sell.negotiation (REST;
+ *                        an Auth'n'Auth token gets 403 "Insufficient
+ *                        permissions" here). Refreshed automatically; the
+ *                        account needs an OAuth sign-in (src/ebay_login.ts).
+ *   GetItem / GetSellerList  the account's Auth'n'Auth token (Trading API).
  *
  * Usage:
- *   npx tsx src/find_eligible_offer_items.ts [options]
+ *   npx tsx src/find_eligible_offer_items.ts --account <name> [options]
  *
  * Options:
  *   --source WHICH     'negotiation' (default, authoritative) or 'watchers'
@@ -28,7 +26,7 @@
  *   --marketplace ID   eBay marketplace (default EBAY_US)
  *   --site N           Trading API site id for enrichment (default 0 = US)
  *   --no-details       listing IDs only, no GetItem enrichment (fast)
- *   --csv PATH         also write a CSV (default reports/eligible-offer-items.csv)
+ *   --csv PATH         also write a CSV (default reports/<account>-eligible-offer-items.csv)
  *   --json PATH        also write the raw joined data as JSON
  *   --max N            stop after N eligible listings (for a quick look)
  *   --concurrency N    GetSellerList pages fetched in parallel (default 6)
@@ -52,11 +50,13 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { findText, findErrors, findBlocks } from "./xml_util.ts";
+import { accountFromArgs, authnAuthToken, oauthToken } from "./ebay_auth.ts";
 
 const NEGOTIATION_BASE = "https://api.ebay.com/sell/negotiation/v1";
 const TRADING_API = "https://api.ebay.com/ws/api.dll";
 const PAGE_LIMIT = 200; // findEligibleItems max page size
 const DETAIL_DELAY_MS = 120; // be gentle: one GetItem per eligible listing
+const NEGOTIATION_SCOPE = "sell.negotiation";
 
 interface Options {
   source: "negotiation" | "watchers";
@@ -84,13 +84,13 @@ interface ItemDetail {
   viewUrl: string;
 }
 
-function parseArgs(argv: string[]): Options {
+function parseArgs(account: string, argv: string[]): Options {
   const opts: Options = {
     source: "negotiation",
     marketplace: "EBAY_US",
     siteId: 0,
     details: true,
-    csvPath: "reports/eligible-offer-items.csv",
+    csvPath: `reports/${account}-eligible-offer-items.csv`,
     jsonPath: undefined,
     max: undefined,
     days: 40,
@@ -189,11 +189,8 @@ async function fetchEligiblePage(
     console.error(`ERROR ${resp.status} from find_eligible_items:\n${text}`);
     if (resp.status === 401 || resp.status === 403) {
       console.error(
-        "\nThis call needs an OAuth *user* access token granted the scope\n" +
-          "  https://api.ebay.com/oauth/api_scope/sell.negotiation\n" +
-          "The Auth'n'Auth tokens in credentials.json cannot call the REST Sell APIs.\n" +
-          "Mint one with src/refresh_token.ts (EBAY_SCOPES must include sell.negotiation)\n" +
-          "and put it in EBAY_OAUTH_TOKEN."
+        "\nThis call needs an OAuth user token granted the sell.negotiation scope.\n" +
+          "Check the account's sign-in with: npx tsx src/ebay_auth.ts status"
       );
     }
     process.exit(1);
@@ -475,19 +472,13 @@ function writeCsv(path: string, rows: ItemDetail[], details: boolean, bestOffer:
 }
 
 async function main() {
-  const opts = parseArgs(process.argv.slice(2));
-  const tradingToken = process.env.EBAY_ACCESS_TOKEN ?? process.env.EBAY_OAUTH_TOKEN;
+  const { account, rest } = accountFromArgs(process.argv.slice(2));
+  const opts = parseArgs(account, rest);
+  const tradingToken = authnAuthToken(account);
 
   let rows: ItemDetail[];
 
   if (opts.source === "watchers") {
-    if (!tradingToken) {
-      console.error(
-        "ERROR: set EBAY_ACCESS_TOKEN first, e.g.\n" +
-          "  export EBAY_ACCESS_TOKEN=$(npx tsx src/get_token.ts jdm-direct-motors)"
-      );
-      process.exit(1);
-    }
     const scan = await scanWatchedListings(tradingToken, opts);
     rows = scan.rows;
     console.error(`scanned ${scan.scanned} of ${scan.total} active listing(s)`);
@@ -496,17 +487,7 @@ async function main() {
       return;
     }
   } else {
-    const oauthToken = process.env.EBAY_OAUTH_TOKEN ?? process.env.EBAY_ACCESS_TOKEN;
-    if (!oauthToken) {
-      console.error(
-        "ERROR: set EBAY_OAUTH_TOKEN to an OAuth user token with the sell.negotiation scope.\n" +
-          "  export EBAY_OAUTH_TOKEN=$(EBAY_SCOPES='https://api.ebay.com/oauth/api_scope/sell.negotiation' npx tsx src/refresh_token.ts)\n" +
-          "Or run with --source watchers to approximate the list from watch counts."
-      );
-      process.exit(1);
-    }
-
-    const listingIds = await fetchAllEligible(oauthToken, opts);
+    const listingIds = await fetchAllEligible(await oauthToken(account, [NEGOTIATION_SCOPE]), opts);
     if (listingIds.length === 0) {
       console.log("No listings currently have an interested buyer to send an offer to.");
       return;
@@ -528,10 +509,6 @@ async function main() {
 
     if (opts.details) {
       console.error(`fetching details for ${listingIds.length} listing(s)...`);
-      if (!tradingToken) {
-        console.error("ERROR: --details needs EBAY_ACCESS_TOKEN (Trading API token) as well.");
-        process.exit(1);
-      }
       const detailed: ItemDetail[] = [];
       for (const [i, listingId] of listingIds.entries()) {
         detailed.push(await fetchItemDetail(tradingToken, opts.siteId, listingId));
