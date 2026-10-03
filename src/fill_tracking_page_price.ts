@@ -11,7 +11,7 @@
  * The workbook is edited in place (XML level); a backup is written next to it.
  *
  * Usage:
- *   npx tsx src/fill_tracking_page_price.ts --account jdm-direct-motors <file.xlsx> [--threshold 9]
+ *   npx tsx src/fill_tracking_page_price.ts --account jdm-direct-motors <file.xlsx> [--threshold 9] [--drop-example]
  */
 
 import { execFileSync } from "node:child_process";
@@ -76,9 +76,9 @@ async function main() {
   const { account, rest } = accountFromArgs(process.argv.slice(2));
   const ti = rest.indexOf("--threshold");
   const threshold = ti >= 0 ? Number(rest[ti + 1]) : 9;
-  const file = resolve(rest.filter((_, i) => ti < 0 || (i !== ti && i !== ti + 1))[0] ?? "");
+  const file = resolve(rest.filter((a, i) => !a.startsWith("--") && (ti < 0 || i !== ti + 1))[0] ?? "");
   if (!existsSync(file)) {
-    console.error("Usage: npx tsx src/fill_tracking_page_price.ts --account <name> <file.xlsx> [--threshold 9]");
+    console.error("Usage: npx tsx src/fill_tracking_page_price.ts --account <name> <file.xlsx> [--threshold 9] [--drop-example]");
     process.exit(1);
   }
   const token = authnAuthToken(account);
@@ -104,6 +104,7 @@ async function main() {
       pairs.push({ track, key: idStr(r.A), keyPrice: Number(r.C) });
     }
   }
+  if (rest.includes("--drop-example")) sheet2 = sheet2.replace(/<row r="2"[^>]*?(?:\/>|>.*?<\/row>)/s, "");
   // skip tracking pages already on the sheet
   const existing = new Set([...sheet2.matchAll(/<c r="A\d+"[^>]*><v>(.*?)<\/v>/g)].map((m) => idStr(m[1])));
   const todo = pairs.filter((p) => !existing.has(p.track));
@@ -120,7 +121,10 @@ async function main() {
     }),
   );
 
-  const lastRow = Math.max(...[...sheet2.matchAll(/<row r="(\d+)"/g)].map((m) => Number(m[1])));
+  // Sheets can ship with blank pre-formatted rows; drop those and append right after the last row with data.
+  const rowRe = /<row r="(\d+)"[^>]*?(?:\/>|>(.*?)<\/row>)/gs;
+  const lastRow = Math.max(1, ...[...sheet2.matchAll(rowRe)].filter((m) => /<v>/.test(m[2] ?? "")).map((m) => Number(m[1])));
+  sheet2 = sheet2.replace(rowRe, (all, r) => (Number(r) > lastRow ? "" : all));
   let rowsXml = "";
   let n = lastRow;
   let yes = 0, missing = 0;
