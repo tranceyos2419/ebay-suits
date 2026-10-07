@@ -7,7 +7,7 @@
  * Input (stdin or file arg), TSV with header: eBay Item Id, Brand, Identity, CCURL
  * Output TSV (Output-sheet layout): eBay Item Id, Brand, Identity, CCURL,
  *   Our Price, Our Shipping fee, Lowest Rank, Lowest page price, Lowest Seller (username),
- *   Diff btw Our Page and Lowest, Lower Page URLs, Exclusion Page URLs
+ *   Diff btw Our Page and Lowest, Lower Page URLs, Exclusion Page URLs, Lowest Page Shipping fee
  *
  * A page's shipping fee is its cheapest shipping option (Browse API, default US destination).
  * Only competitor pages whose shipping fee is within +/-20% of ours are compared
@@ -105,7 +105,7 @@ async function main() {
   const rows = lines.slice(1).map((l) => l.split("\t"));
   const t = await requestToken({ grant_type: "client_credentials", scope: "https://api.ebay.com/oauth/api_scope" });
   const token = t.access_token;
-  console.log(["eBay Item Id", "Brand", "Identity", "CCURL", "Our Price", "Our Shipping fee", "Lowest Rank", "Lowest page price", "Lowest Seller", "Diff btw Our Page and Lowest", "Lower Page URLs", "Exclusion Page URLs"].join("\t"));
+  console.log(["eBay Item Id", "Brand", "Identity", "CCURL", "Our Price", "Our Shipping fee", "Lowest Rank", "Lowest page price", "Lowest Seller", "Diff btw Our Page and Lowest", "Lower Page URLs", "Exclusion Page URLs", "Lowest Page Shipping fee"].join("\t"));
   for (const [id, brand, identity, ccurl] of rows) {
     const mine = await ourPrice(id, token);
     if (mine === undefined) {
@@ -129,6 +129,8 @@ async function main() {
       cols.push("", "", "", "");
     }
     cols.push(excluded.map(url).join(","));
+    const lowShip = kept.length ? shippingFee(kept[0]) : undefined;
+    cols.push(lowShip === undefined ? "" : usd(lowShip));
     for (const i of excluded) {
       const ship = shippingFee(i);
       exclusionRows.push([id, identity, usd(mine.price), ourShip === undefined ? "" : usd(ourShip), url(i), i.seller?.username ?? "", usd(Number(i.price.value)), ship === undefined ? "" : usd(ship), ship === undefined ? "Shipping fee unknown" : "Shipping outside 20% of ours"]);
