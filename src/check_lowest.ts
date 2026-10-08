@@ -96,48 +96,65 @@ async function japaneseListings(ccurl: string, token: string): Promise<any[]> {
 }
 
 const usd = (n: number) => `$${n.toFixed(2)}`;
+const signed = (n: number, plus: boolean) => `${n < 0 ? "-" : plus ? "+" : ""}$${Math.abs(n).toFixed(2)}`;
+const SHIP_TOLERANCE = 0.2;
+
+function shippingOf(i: any): number | undefined {
+  const v = (i.shippingOptions ?? []).map((o: any) => Number(o.shippingCost?.value)).filter((n: number) => !Number.isNaN(n));
+  return v.length ? Math.min(...v) : undefined;
+}
 
 async function main() {
   const file = process.argv[2];
   const lines = readFileSync(file ?? 0, "utf8").split("\n").map((l) => l.replace(/\r$/, "")).filter((l) => l.trim());
-  const exclusionsFile = process.argv[3];
-  const exclusionRows: string[][] = [["Our Item Id", "Identity", "Our Price", "Our Shipping fee", "Excluded Page URL", "Seller", "Page Price", "Page Shipping fee", "Reason"]];
   const rows = lines.slice(1).map((l) => l.split("\t"));
   const t = await requestToken({ grant_type: "client_credentials", scope: "https://api.ebay.com/oauth/api_scope" });
   const token = t.access_token;
-  console.log(["eBay Item Id", "Brand", "Identity", "CCURL", "Our Price", "Our Shipping fee", "Lowest Rank", "Lowest page price", "Lowest Seller", "Diff btw Our Page and Lowest", "Lower Page URLs", "Exclusion Page URLs", "Lowest Page Shipping fee"].join("\t"));
-  for (const [id, brand, identity, ccurl] of rows) {
+  const output: (string | number)[][] = [];
+  const excluded: string[][] = [];
+  for (const r of rows) {
+    const [id, brand, identity, ccurl] = r;
+    const ourShip = Number((r[5] ?? "").replace(/[$,]/g, ""));
     const mine = await ourPrice(id, token);
-    if (mine === undefined) {
-      console.log([id, brand, identity, ccurl, "", "", "ERROR: our price not found"].join("\t"));
+    if (mine === undefined || Number.isNaN(ourShip)) {
+      output.push([id, brand, identity, ccurl, "", "", "ERROR: our price/shipping not found"]);
       continue;
     }
-    const ourShip = mine.shipping;
     const others = (await japaneseListings(ccurl, token)).filter(
       (i) => !OUR_SELLERS.has(i.seller?.username) && i.legacyItemId !== id,
     );
-    const cheaper = others.filter((i) => Number(i.price.value) < mine.price).sort((a, b) => Number(a.price.value) - Number(b.price.value));
-    const url = (i: any) => `https://www.ebay.com/itm/${i.legacyItemId}`;
-    const kept = ourShip === undefined ? [] : cheaper.filter((i) => shippingWithinTolerance(ourShip, shippingFee(i)));
-    const excluded = cheaper.filter((i) => !kept.includes(i));
+    const lower = others.filter((i) => Number(i.price.value) < mine).sort((a, b) => Number(a.price.value) - Number(b.price.value));
+    const kept: any[] = [];
+    const dropped: any[] = [];
+    for (const i of lower) {
+      const ship = shippingOf(i);
+      (ship !== undefined && Math.abs(ship - ourShip) <= ourShip * SHIP_TOLERANCE + 1e-9 ? kept : dropped).push(i);
+    }
+    for (const i of dropped) {
+      const ship = shippingOf(i);
+      excluded.push([
+        id, i.legacyItemId, i.seller?.username ?? "", usd(Number(i.price.value)),
+        ship === undefined ? "" : usd(ship),
+        ship === undefined ? "Shipping unknown" : "Shipping outside 20% of ours",
+        `https://www.ebay.com/itm/${i.legacyItemId}`, identity, usd(ourShip),
+        ship === undefined ? "" : signed(ship - ourShip, true),
+      ]);
+    }
     const sellers = new Set(kept.map((i) => i.seller?.username));
-    const cols = [id, brand, identity, ccurl, usd(mine.price), ourShip === undefined ? "" : usd(ourShip), String(1 + sellers.size)];
+    const row: (string | number)[] = [id, brand, identity, ccurl, usd(mine), usd(ourShip), 1 + sellers.size];
     if (kept.length) {
-      const low = Number(kept[0].price.value);
-      cols.push(usd(low), kept[0].seller?.username ?? "", usd(mine.price - low), kept.map(url).join(","));
+      const low = kept[0];
+      const lp = Number(low.price.value);
+      const ls = shippingOf(low)!;
+      row.push(usd(lp), usd(mine - lp), usd(ls), signed(ourShip - ls, false), low.seller?.username ?? "", low.legacyItemId,
+        `https://www.ebay.com/itm/${low.legacyItemId}`, kept.map((i) => `https://www.ebay.com/itm/${i.legacyItemId}`).join(","));
     } else {
-      cols.push("", "", "", "");
+      row.push("", "", "", "", "", "", "", "");
     }
-    cols.push(excluded.map(url).join(","));
-    const lowShip = kept.length ? shippingFee(kept[0]) : undefined;
-    cols.push(lowShip === undefined ? "" : usd(lowShip));
-    for (const i of excluded) {
-      const ship = shippingFee(i);
-      exclusionRows.push([id, identity, usd(mine.price), ourShip === undefined ? "" : usd(ourShip), url(i), i.seller?.username ?? "", usd(Number(i.price.value)), ship === undefined ? "" : usd(ship), ship === undefined ? "Shipping fee unknown" : "Shipping outside 20% of ours"]);
-    }
-    console.log(cols.join("\t"));
+    row.push(dropped.map((i) => `https://www.ebay.com/itm/${i.legacyItemId}`).join(","));
+    output.push(row);
   }
-  if (exclusionsFile) writeFileSync(exclusionsFile, exclusionRows.map((r) => r.join("\t")).join("\n") + "\n");
+  console.log(JSON.stringify({ output, excluded }));
 }
 
 main().catch((e) => {
