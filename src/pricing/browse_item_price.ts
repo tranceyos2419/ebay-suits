@@ -8,14 +8,14 @@
  * the lowest variation price).
  *
  * Usage:
- *   npx tsx src/browse_item_price.ts <itemId> [itemId ...]
- *   npx tsx src/browse_item_price.ts < ids.txt      (one id per line)
+ *   npx tsx src/pricing/browse_item_price.ts <itemId> [itemId ...]
+ *   npx tsx src/pricing/browse_item_price.ts < ids.txt      (one id per line)
  */
 
 import { readFileSync } from "node:fs";
-import { die } from "./ebay_auth.ts";
-import { appToken, getLegacyItem } from "./browse_api.ts";
-import { runMain } from "./util.ts";
+import { die } from "../auth/ebay_auth.ts";
+import { appToken, getLegacyItem } from "../lib/browse_api.ts";
+import { runMain } from "../lib/util.ts";
 
 async function getPrice(itemId: string, token: string): Promise<{ price?: string; currency?: string; note?: string }> {
   const r = await getLegacyItem(itemId, token);
@@ -30,7 +30,7 @@ async function main() {
   let ids = process.argv.slice(2);
   if (!ids.length) ids = readFileSync(0, "utf8").split(/\s+/);
   ids = ids.map((s) => s.trim()).filter((s) => /^\d+$/.test(s));
-  if (!ids.length) die("Usage: npx tsx src/browse_item_price.ts <itemId> [itemId ...]");
+  if (!ids.length) die("Usage: npx tsx src/pricing/browse_item_price.ts <itemId> [itemId ...]");
   const token = await appToken();
   console.log(["itemId", "price", "currency", "note"].join("\t"));
   for (const id of ids) {

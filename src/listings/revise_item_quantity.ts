@@ -5,16 +5,16 @@
  * Each item is revised in its own call so one failure doesn't block the rest.
  *
  * Usage:
- *   npx tsx src/revise_item_quantity.ts --account <name> --quantity <N> <ITEM_ID> [ITEM_ID ...]
+ *   npx tsx src/listings/revise_item_quantity.ts --account <name> --quantity <N> <ITEM_ID> [ITEM_ID ...]
  */
 
-import { findText } from "./xml_util.ts";
-import { accountFromArgs, authnAuthToken, die } from "./ebay_auth.ts";
-import { printErrors, tradingCall } from "./trading_api.ts";
-import { runMain } from "./util.ts";
+import { findText } from "../lib/xml_util.ts";
+import { accountFromArgs, authnAuthToken, die } from "../auth/ebay_auth.ts";
+import { printErrors, tradingCall } from "../lib/trading_api.ts";
+import { runMain } from "../lib/util.ts";
 
 const USAGE =
-  "Usage: npx tsx src/revise_item_quantity.ts --account <name> --quantity <N> <ITEM_ID> [ITEM_ID ...]";
+  "Usage: npx tsx src/listings/revise_item_quantity.ts --account <name> --quantity <N> <ITEM_ID> [ITEM_ID ...]";
 
 async function reviseQuantity(token: string, itemId: string, quantity: number): Promise<boolean> {
   const r = await tradingCall(

@@ -3,12 +3,12 @@
  * ebay_login.ts -- sign a seller account in to our eBay app (OAuth
  * authorization-code grant) and save its refresh token, so the REST Sell
  * APIs work for that account without the developer portal. After this,
- * src/ebay_auth.ts mints 2-hour access tokens from the refresh token on
+ * src/auth/ebay_auth.ts mints 2-hour access tokens from the refresh token on
  * demand (~18 months, until the refresh token expires).
  *
  * Usage (run it in your own terminal -- it waits for you to paste):
- *   npx tsx src/ebay_login.ts --account love-of-japan
- *   npx tsx src/ebay_login.ts --account love-of-japan --scopes sell.account sell.negotiation
+ *   npx tsx src/auth/ebay_login.ts --account love-of-japan
+ *   npx tsx src/auth/ebay_login.ts --account love-of-japan --scopes sell.account sell.negotiation
  *
  *   1. It prints an eBay sign-in link. Open it and sign in AS THAT SELLER
  *      (prompt=login forces a fresh sign-in, so whoever is already signed in
@@ -109,7 +109,7 @@ async function main() {
     console.error(`1. Open this link and sign in as the eBay seller '${getAccount(account).ebayUserId ?? account}':\n\n${url}\n`);
     console.error("2. After agreeing, copy the full address of the page eBay sends you to.\n");
     if (!process.stdin.isTTY) {
-      die(`No terminal to paste into -- re-run with:\n  npx tsx src/ebay_login.ts --account ${account} --code '<address or code>'`);
+      die(`No terminal to paste into -- re-run with:\n  npx tsx src/auth/ebay_login.ts --account ${account} --code '<address or code>'`);
     }
     const rl = createInterface({ input: process.stdin, output: process.stderr });
     pasted = await rl.question("3. Paste it here: ");
@@ -162,7 +162,7 @@ async function main() {
   });
 
   console.error(`\nSaved. ${account} (eBay user ${signedInAs}) is signed in.`);
-  console.error(`Check it with: npx tsx src/ebay_auth.ts status`);
+  console.error(`Check it with: npx tsx src/auth/ebay_auth.ts status`);
 }
 
 main().catch((err) => die(String(err?.stack ?? err)));

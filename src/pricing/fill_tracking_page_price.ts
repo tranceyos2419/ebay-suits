@@ -11,17 +11,17 @@
  * The workbook is edited in place (XML level); a backup is written next to it.
  *
  * Usage:
- *   npx tsx src/fill_tracking_page_price.ts --account jdm-direct-motors <file.xlsx> [--threshold 9] [--drop-example]
+ *   npx tsx src/pricing/fill_tracking_page_price.ts --account jdm-direct-motors <file.xlsx> [--threshold 9] [--drop-example]
  */
 
 import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { findText } from "./xml_util.ts";
-import { accountFromArgs, authnAuthToken, die } from "./ebay_auth.ts";
-import { tradingCall } from "./trading_api.ts";
-import { mapLimit, runMain, sleep } from "./util.ts";
+import { findText } from "../lib/xml_util.ts";
+import { accountFromArgs, authnAuthToken, die } from "../auth/ebay_auth.ts";
+import { tradingCall } from "../lib/trading_api.ts";
+import { mapLimit, runMain, sleep } from "../lib/util.ts";
 
 const TRACK_COLS = ["Q","R","S","T","U","V","W","X","Y","Z","AA","AB","AC","AD","AE","AF","AG","AH","AI","AJ"];
 
@@ -63,7 +63,7 @@ async function main() {
   const ti = rest.indexOf("--threshold");
   const threshold = ti >= 0 ? Number(rest[ti + 1]) : 9;
   const file = resolve(rest.filter((a, i) => !a.startsWith("--") && (ti < 0 || i !== ti + 1))[0] ?? "");
-  if (!existsSync(file)) die("Usage: npx tsx src/fill_tracking_page_price.ts --account <name> <file.xlsx> [--threshold 9] [--drop-example]");
+  if (!existsSync(file)) die("Usage: npx tsx src/pricing/fill_tracking_page_price.ts --account <name> <file.xlsx> [--threshold 9] [--drop-example]");
   const token = authnAuthToken(account);
 
   const dir = mkdtempSync(join(tmpdir(), "xlsx-"));

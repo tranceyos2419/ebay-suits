@@ -14,7 +14,7 @@
  *     Returns the saved access token while it has >5 minutes left and covers
  *     the scopes asked for; otherwise mints a new one from the account's
  *     refresh token and saves it back. The refresh token itself comes from
- *     src/ebay_login.ts.
+ *     src/auth/ebay_login.ts.
  *
  * credentials.json (project root, chmod 600, gitignored):
  *   {
@@ -30,11 +30,11 @@
  *   }
  *
  * CLI:
- *   npx tsx src/ebay_auth.ts status
+ *   npx tsx src/auth/ebay_auth.ts status
  *       every account's tokens: expiry dates and scopes (never the values)
- *   npx tsx src/ebay_auth.ts whoami --account <name>
+ *   npx tsx src/auth/ebay_auth.ts whoami --account <name>
  *       ask eBay which user the account's token belongs to, and record it
- *   npx tsx src/ebay_auth.ts token --account <name> [--oauth [scope ...]]
+ *   npx tsx src/auth/ebay_auth.ts token --account <name> [--oauth [scope ...]]
  *       print a token to stdout for ad-hoc use (e.g. curl); scopes can be
  *       short names like sell.account
  */
@@ -42,9 +42,9 @@
 import { chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { tradingCall } from "./trading_api.ts";
+import { tradingCall } from "../lib/trading_api.ts";
 
-export const CREDS_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "credentials.json");
+export const CREDS_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "credentials.json");
 
 const TOKEN_URL = "https://api.ebay.com/identity/v1/oauth2/token";
 const SCOPE_BASE = "https://api.ebay.com/oauth/api_scope";
@@ -102,7 +102,7 @@ function readFromDisk(): CredentialsFile {
   if (!existsSync(CREDS_PATH)) die(`ERROR: no credentials.json found at ${CREDS_PATH}`);
   const parsed = JSON.parse(readFileSync(CREDS_PATH, "utf8"));
   if (!parsed || typeof parsed.accounts !== "object") {
-    die(`ERROR: ${CREDS_PATH} has no "accounts" object -- see the layout in src/ebay_auth.ts`);
+    die(`ERROR: ${CREDS_PATH} has no "accounts" object -- see the layout in src/auth/ebay_auth.ts`);
   }
   return parsed as CredentialsFile;
 }
@@ -256,7 +256,7 @@ export async function oauthToken(name: string, scopes: string[]): Promise<string
 
 async function mintOrReuse(name: string, needed: string[]): Promise<string> {
   const o = getAccount(name).oauth ?? {};
-  const login = `npx tsx src/ebay_login.ts --account ${name}`;
+  const login = `npx tsx src/auth/ebay_login.ts --account ${name}`;
 
   if (
     o.accessToken &&
@@ -335,7 +335,7 @@ function status(): void {
   console.log(`app keys: ${app?.clientId && app.clientSecret ? "present" : "MISSING"}${app?.ruName ? ", RuName set" : ", no RuName"}`);
   for (const [name, a] of Object.entries(creds.accounts)) {
     const o = a.oauth ?? {};
-    const login = `run: npx tsx src/ebay_login.ts --account ${name}`;
+    const login = `run: npx tsx src/auth/ebay_login.ts --account ${name}`;
     let access = "none";
     if (o.accessToken) {
       const exp = o.accessTokenExpiresAt ? Date.parse(o.accessTokenExpiresAt) : NaN;
@@ -343,7 +343,7 @@ function status(): void {
         ? `valid for ${Math.round((exp - Date.now()) / 60000)} more min (${(o.accessTokenScopes ?? []).map(shortScope).join(", ")})`
         : o.refreshToken ? "expired (refreshed automatically when needed)" : "expired";
     }
-    console.log(`\n${name}  (eBay user: ${a.ebayUserId ?? `unknown -- run: npx tsx src/ebay_auth.ts whoami --account ${name}`})`);
+    console.log(`\n${name}  (eBay user: ${a.ebayUserId ?? `unknown -- run: npx tsx src/auth/ebay_auth.ts whoami --account ${name}`})`);
     console.log(`  Auth'n'Auth token    ${a.authnauth?.token ? describeExpiry(a.authnauth.expiresAt) : "MISSING"}   [Trading, Post-Order]`);
     console.log(`  OAuth refresh token  ${o.refreshToken ? describeExpiry(o.refreshTokenExpiresAt) : `MISSING -- ${login}`}   [REST Sell APIs]`);
     if (o.refreshToken) {
@@ -382,9 +382,9 @@ async function cli(): Promise<void> {
   }
   die(
     "Usage:\n" +
-      "  npx tsx src/ebay_auth.ts status\n" +
-      "  npx tsx src/ebay_auth.ts whoami --account <name>\n" +
-      "  npx tsx src/ebay_auth.ts token --account <name> [--oauth [scope ...]]"
+      "  npx tsx src/auth/ebay_auth.ts status\n" +
+      "  npx tsx src/auth/ebay_auth.ts whoami --account <name>\n" +
+      "  npx tsx src/auth/ebay_auth.ts token --account <name> [--oauth [scope ...]]"
   );
 }
 

@@ -4,13 +4,13 @@
  * Trading API's GetMemberMessages call.
  *
  * Usage:
- *   npx tsx src/get_member_messages.ts --account <name> [COUNT]
+ *   npx tsx src/messages/get_member_messages.ts --account <name> [COUNT]
  */
 
-import { findBlocks, findText } from "./xml_util.ts";
-import { accountFromArgs, authnAuthToken } from "./ebay_auth.ts";
-import { printErrors, tradingCall } from "./trading_api.ts";
-import { DAY_MS, runMain } from "./util.ts";
+import { findBlocks, findText } from "../lib/xml_util.ts";
+import { accountFromArgs, authnAuthToken } from "../auth/ebay_auth.ts";
+import { printErrors, tradingCall } from "../lib/trading_api.ts";
+import { DAY_MS, runMain } from "../lib/util.ts";
 
 async function main() {
   const { account, rest } = accountFromArgs(process.argv.slice(2));

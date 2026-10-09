@@ -5,15 +5,15 @@
  * Price Tracker" Google Sheet: "Tracking Page Price" and "Deactivate" sheets.
  *
  * Usage:
- *   npx tsx src/build_price_tracker_xlsx.ts <prefix> <output.xlsx>
- *   e.g. npx tsx src/build_price_tracker_xlsx.ts reports/key-pages-20-30 reports/key-pages-20-30.xlsx
+ *   npx tsx src/pricing/build_price_tracker_xlsx.ts <prefix> <output.xlsx>
+ *   e.g. npx tsx src/pricing/build_price_tracker_xlsx.ts reports/key-pages-20-30 reports/key-pages-20-30.xlsx
  */
 
 import { readFileSync } from "node:fs";
 import ExcelJS from "exceljs";
-import { die } from "./ebay_auth.ts";
-import { parseCsv } from "./csv.ts";
-import { runMain } from "./util.ts";
+import { die } from "../auth/ebay_auth.ts";
+import { parseCsv } from "../lib/csv.ts";
+import { runMain } from "../lib/util.ts";
 
 const WIDTHS = [26, 22, 24, 18, 20, 12, 22];
 
@@ -36,7 +36,7 @@ function addSheet(wb: ExcelJS.Workbook, name: string, csvPath: string) {
 
 async function main() {
   const [prefix, out] = process.argv.slice(2);
-  if (!prefix || !out) die("Usage: npx tsx src/build_price_tracker_xlsx.ts <prefix> <output.xlsx>");
+  if (!prefix || !out) die("Usage: npx tsx src/pricing/build_price_tracker_xlsx.ts <prefix> <output.xlsx>");
   const wb = new ExcelJS.Workbook();
   const a = addSheet(wb, "Tracking Page Price", `${prefix}-tracking-page-price.csv`);
   const d = addSheet(wb, "Deactivate", `${prefix}-deactivate.csv`);

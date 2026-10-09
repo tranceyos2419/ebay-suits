@@ -8,17 +8,17 @@
  * transactionDate (when eBay recorded the buyer's payment).
  *
  * Needs the sell.finances OAuth scope. Sign in including it with:
- *   npx tsx src/ebay_login.ts --account <name> --scopes api_scope sell.account sell.inventory sell.negotiation sell.fulfillment sell.finances
+ *   npx tsx src/auth/ebay_login.ts --account <name> --scopes api_scope sell.account sell.inventory sell.negotiation sell.fulfillment sell.finances
  *
  * Usage:
- *   npx tsx src/payout_lag.ts --account <name> [DAYS] [--json out.json]
+ *   npx tsx src/sales/payout_lag.ts --account <name> [DAYS] [--json out.json]
  *
  * DAYS defaults to 180 (payouts dated within the last DAYS days).
  */
 
 import { writeFileSync } from "node:fs";
-import { accountFromArgs, die, oauthToken } from "./ebay_auth.ts";
-import { DAY_MS, runMain } from "./util.ts";
+import { accountFromArgs, die, oauthToken } from "../auth/ebay_auth.ts";
+import { DAY_MS, runMain } from "../lib/util.ts";
 
 const FINANCES_API = "https://apiz.ebay.com/sell/finances/v1";
 const FINANCES_SCOPE = "sell.finances";

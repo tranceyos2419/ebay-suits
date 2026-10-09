@@ -16,18 +16,18 @@
  * wider ask (e.g. a whole month) is walked in 30-day chunks.
  *
  * Usage:
- *   npx tsx src/find_order_by_tracking.ts <tracking-number> --month 2026-07
- *   npx tsx src/find_order_by_tracking.ts <tracking-number> --from 2026-06-20 --to 2026-08-10
- *   npx tsx src/find_order_by_tracking.ts <tracking-number> --account jdm-direct-motors --month 2026-07
+ *   npx tsx src/sales/find_order_by_tracking.ts <tracking-number> --month 2026-07
+ *   npx tsx src/sales/find_order_by_tracking.ts <tracking-number> --from 2026-06-20 --to 2026-08-10
+ *   npx tsx src/sales/find_order_by_tracking.ts <tracking-number> --account jdm-direct-motors --month 2026-07
  *
  * With no --account, every account in credentials.json is searched (each
- * with its own Auth'n'Auth token, via src/ebay_auth.ts).
+ * with its own Auth'n'Auth token, via src/auth/ebay_auth.ts).
  */
 
-import { findBlocks, findText } from "./xml_util.ts";
-import { accountNames, authnAuthToken, die, useAccount } from "./ebay_auth.ts";
-import { fetchOrderBlocks, money, num } from "./trading_api.ts";
-import { normalizeTracking as normalize, runMain } from "./util.ts";
+import { findBlocks, findText } from "../lib/xml_util.ts";
+import { accountNames, authnAuthToken, die, useAccount } from "../auth/ebay_auth.ts";
+import { fetchOrderBlocks, money, num } from "../lib/trading_api.ts";
+import { normalizeTracking as normalize, runMain } from "../lib/util.ts";
 
 interface Options {
   tracking: string;
@@ -85,7 +85,7 @@ function parseArgs(argv: string[]): Options {
 
   if (!tracking) {
     die(
-      "Usage: npx tsx src/find_order_by_tracking.ts <tracking-number> [--account <name>] (--month YYYY-MM | --from <date> --to <date>)"
+      "Usage: npx tsx src/sales/find_order_by_tracking.ts <tracking-number> [--account <name>] (--month YYYY-MM | --from <date> --to <date>)"
     );
   }
 

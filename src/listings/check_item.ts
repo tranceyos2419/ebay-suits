@@ -6,18 +6,18 @@
  * profile. Makes no changes.
  *
  * Usage:
- *   npx tsx src/check_item.ts --account jdm-direct-motors 397429202355
+ *   npx tsx src/listings/check_item.ts --account jdm-direct-motors 397429202355
  */
 
-import { findText } from "./xml_util.ts";
-import { accountFromArgs, authnAuthToken, die } from "./ebay_auth.ts";
-import { printErrors, tradingCall } from "./trading_api.ts";
-import { runMain } from "./util.ts";
+import { findText } from "../lib/xml_util.ts";
+import { accountFromArgs, authnAuthToken, die } from "../auth/ebay_auth.ts";
+import { printErrors, tradingCall } from "../lib/trading_api.ts";
+import { runMain } from "../lib/util.ts";
 
 async function main() {
   const { account, rest } = accountFromArgs(process.argv.slice(2));
   const itemId = rest[0];
-  if (!itemId || rest.length !== 1) die("Usage: npx tsx src/check_item.ts --account <name> <ITEM_ID>");
+  if (!itemId || rest.length !== 1) die("Usage: npx tsx src/listings/check_item.ts --account <name> <ITEM_ID>");
 
   const r = await tradingCall(
     authnAuthToken(account),

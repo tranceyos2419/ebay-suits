@@ -4,14 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check-item": "tsx src/check_item.ts",
-    "shipping-policy": "tsx src/ebay_shipping_policy_tool.ts",
-    "auth": "tsx src/ebay_auth.ts",
-    "login": "tsx src/ebay_login.ts",
-    "weekly-revenue": "tsx src/weekly_revenue.ts",
-    "find-eligible-offers": "tsx src/find_eligible_offer_items.ts",
-    "find-return-by-tracking": "tsx src/find_return_by_tracking.ts",
-    "cleanup-reports": "tsx src/cleanup_reports.ts"
+    "check-item": "tsx src/listings/check_item.ts",
+    "shipping-policy": "tsx src/listings/ebay_shipping_policy_tool.ts",
+    "auth": "tsx src/auth/ebay_auth.ts",
+    "login": "tsx src/auth/ebay_login.ts",
+    "weekly-revenue": "tsx src/sales/weekly_revenue.ts",
+    "find-eligible-offers": "tsx src/listings/find_eligible_offer_items.ts",
+    "find-return-by-tracking": "tsx src/returns/find_return_by_tracking.ts",
+    "cleanup-reports": "tsx src/maintenance/cleanup_reports.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

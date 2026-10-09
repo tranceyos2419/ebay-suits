@@ -4,15 +4,15 @@
  * Post-Order API (Return Management).
  *
  * Usage:
- *   npx tsx src/get_returns.ts --account <name> [--days N] [--state OPEN|CLOSED|ALL] [--json]
+ *   npx tsx src/returns/get_returns.ts --account <name> [--days N] [--state OPEN|CLOSED|ALL] [--json]
  *
  * Uses the account's Auth'n'Auth token -- the Post-Order API accepts it via
  * the `Authorization: TOKEN <token>` header.
  */
 
-import { accountFromArgs, authnAuthToken, die } from "./ebay_auth.ts";
-import { postOrderGet } from "./post_order_api.ts";
-import { DAY_MS, runMain } from "./util.ts";
+import { accountFromArgs, authnAuthToken, die } from "../auth/ebay_auth.ts";
+import { postOrderGet } from "../lib/post_order_api.ts";
+import { DAY_MS, runMain } from "../lib/util.ts";
 
 interface Args {
   days: number;

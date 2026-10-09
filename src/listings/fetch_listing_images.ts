@@ -6,7 +6,7 @@
  * Makes no changes to eBay.
  *
  * Usage:
- *   npx tsx src/fetch_listing_images.ts --account jdm-direct-motors \
+ *   npx tsx src/listings/fetch_listing_images.ts --account jdm-direct-motors \
  *     --out <dir> [--all] <input.csv>
  *
  * Writes <dir>/<itemId>_<n>.jpg and prints one line per item:
@@ -15,11 +15,11 @@
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { findBlocks, findText } from "./xml_util.ts";
-import { accountFromArgs, authnAuthToken, die } from "./ebay_auth.ts";
-import { parseCsv } from "./csv.ts";
-import { tradingCall } from "./trading_api.ts";
-import { runMain } from "./util.ts";
+import { findBlocks, findText } from "../lib/xml_util.ts";
+import { accountFromArgs, authnAuthToken, die } from "../auth/ebay_auth.ts";
+import { parseCsv } from "../lib/csv.ts";
+import { tradingCall } from "../lib/trading_api.ts";
+import { runMain } from "../lib/util.ts";
 
 async function main() {
   const { account, rest } = accountFromArgs(process.argv.slice(2));
@@ -31,7 +31,7 @@ async function main() {
     else if (rest[i] === "--all") all = true;
     else csvPath = rest[i];
   }
-  if (!outDir || !csvPath) die("Usage: npx tsx src/fetch_listing_images.ts --account <name> --out <dir> [--all] <input.csv>");
+  if (!outDir || !csvPath) die("Usage: npx tsx src/listings/fetch_listing_images.ts --account <name> --out <dir> [--all] <input.csv>");
   mkdirSync(outDir, { recursive: true });
 
   const ids = parseCsv(readFileSync(csvPath, "utf8"))

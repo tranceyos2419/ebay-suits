@@ -3,7 +3,7 @@
  * (client credentials), so it works for any seller's listing.
  */
 
-import { requestToken } from "./ebay_auth.ts";
+import { requestToken } from "../auth/ebay_auth.ts";
 import { sleep } from "./util.ts";
 
 const BROWSE = "https://api.ebay.com/buy/browse/v1";

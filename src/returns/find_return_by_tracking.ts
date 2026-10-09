@@ -14,16 +14,16 @@
  * guessing one path we collect every tracking-shaped field in the record.
  *
  * Usage:
- *   npx tsx src/find_return_by_tracking.ts <tracking-number> --account jdm-direct-motors
- *   npx tsx src/find_return_by_tracking.ts --account jdm-direct-motors --list --days 365
+ *   npx tsx src/returns/find_return_by_tracking.ts <tracking-number> --account jdm-direct-motors
+ *   npx tsx src/returns/find_return_by_tracking.ts --account jdm-direct-motors --list --days 365
  *
  * Auth: --account <name> (required) -- uses that account's Auth'n'Auth token,
  * which the Post-Order API takes as `Authorization: TOKEN <token>`.
  */
 
-import { accountFromArgs, authnAuthToken, die } from "./ebay_auth.ts";
-import { postOrderGet } from "./post_order_api.ts";
-import { DAY_MS, mapLimit, normalizeTracking as normalize, runMain } from "./util.ts";
+import { accountFromArgs, authnAuthToken, die } from "../auth/ebay_auth.ts";
+import { postOrderGet } from "../lib/post_order_api.ts";
+import { DAY_MS, mapLimit, normalizeTracking as normalize, runMain } from "../lib/util.ts";
 
 const PAGE_LIMIT = 50;
 const CONCURRENCY = 5;
@@ -66,8 +66,8 @@ function parseArgs(argv: string[]): Options {
   }
   if (!opts.tracking && !opts.list) {
     die(
-      "Usage: npx tsx src/find_return_by_tracking.ts <tracking-number> --account <name> [--days N]\n" +
-        "       npx tsx src/find_return_by_tracking.ts --account <name> --list [--days N]"
+      "Usage: npx tsx src/returns/find_return_by_tracking.ts <tracking-number> --account <name> [--days N]\n" +
+        "       npx tsx src/returns/find_return_by_tracking.ts --account <name> --list [--days N]"
     );
   }
   return opts;

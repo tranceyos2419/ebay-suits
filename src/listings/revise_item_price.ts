@@ -4,19 +4,19 @@
  * listing via the Trading API's ReviseItem call.
  *
  * Usage:
- *   npx tsx src/revise_item_price.ts --account <name> <ITEM_ID> <NEW_PRICE>
+ *   npx tsx src/listings/revise_item_price.ts --account <name> <ITEM_ID> <NEW_PRICE>
  */
 
-import { findText } from "./xml_util.ts";
-import { accountFromArgs, authnAuthToken, die } from "./ebay_auth.ts";
-import { printErrors, tradingCall } from "./trading_api.ts";
-import { runMain } from "./util.ts";
+import { findText } from "../lib/xml_util.ts";
+import { accountFromArgs, authnAuthToken, die } from "../auth/ebay_auth.ts";
+import { printErrors, tradingCall } from "../lib/trading_api.ts";
+import { runMain } from "../lib/util.ts";
 
 async function main() {
   const { account, rest } = accountFromArgs(process.argv.slice(2));
   const [itemId, newPrice] = rest;
   if (!itemId || !newPrice || rest.length !== 2) {
-    die("Usage: npx tsx src/revise_item_price.ts --account <name> <ITEM_ID> <NEW_PRICE>");
+    die("Usage: npx tsx src/listings/revise_item_price.ts --account <name> <ITEM_ID> <NEW_PRICE>");
   }
 
   const r = await tradingCall(

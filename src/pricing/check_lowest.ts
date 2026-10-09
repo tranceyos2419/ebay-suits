@@ -23,12 +23,12 @@
  * below us (1 = we are the lowest). Our own accounts are excluded from the comparison.
  *
  * Usage:
- *   npx tsx src/check_lowest.ts input.tsv > output.json
+ *   npx tsx src/pricing/check_lowest.ts input.tsv > output.json
  */
 
 import { readFileSync } from "node:fs";
-import { appToken, browse, getLegacyItem, shippingFee } from "./browse_api.ts";
-import { runMain } from "./util.ts";
+import { appToken, browse, getLegacyItem, shippingFee } from "../lib/browse_api.ts";
+import { runMain } from "../lib/util.ts";
 
 const OUR_SELLERS = new Set(["jdm-direct-motors", "love-of-japan"]);
 const SHIPPING_TOLERANCE = 0.2;

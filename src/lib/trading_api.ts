@@ -3,7 +3,7 @@
  *
  * Every Trading call has the same envelope and headers; scripts pass only the
  * call name and the request's inner XML, and get back the raw response plus
- * its Ack and <Errors>. Tokens come from src/ebay_auth.ts (authnAuthToken).
+ * its Ack and <Errors>. Tokens come from src/auth/ebay_auth.ts (authnAuthToken).
  */
 
 import { findBlocks, findErrors, findText, type TradingError } from "./xml_util.ts";

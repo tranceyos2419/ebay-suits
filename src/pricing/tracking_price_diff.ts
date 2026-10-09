@@ -11,14 +11,14 @@
  * Prices are cached in <out>-price-cache.json so a re-run only looks up what is missing.
  *
  * Usage:
- *   npx tsx src/tracking_price_diff.ts <input.csv> [--threshold 2] [--out reports/name-prefix]
+ *   npx tsx src/pricing/tracking_price_diff.ts <input.csv> [--threshold 2] [--out reports/name-prefix]
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { die } from "./ebay_auth.ts";
-import { appToken, getLegacyItem } from "./browse_api.ts";
-import { parseCsv, toCsv, type CsvValue } from "./csv.ts";
-import { mapLimit, runMain } from "./util.ts";
+import { die } from "../auth/ebay_auth.ts";
+import { appToken, getLegacyItem } from "../lib/browse_api.ts";
+import { parseCsv, toCsv, type CsvValue } from "../lib/csv.ts";
+import { mapLimit, runMain } from "../lib/util.ts";
 
 type Price = { price?: number; note?: string };
 
@@ -39,7 +39,7 @@ async function main() {
   const threshold = Number(opt("--threshold") ?? 2);
   const optVals = new Set(["--threshold", "--out"].map(opt).filter(Boolean));
   const file = args.filter((a) => !a.startsWith("--") && !optVals.has(a))[0];
-  if (!file || !existsSync(file)) die("Usage: npx tsx src/tracking_price_diff.ts <input.csv> [--threshold 2] [--out reports/prefix]");
+  if (!file || !existsSync(file)) die("Usage: npx tsx src/pricing/tracking_price_diff.ts <input.csv> [--threshold 2] [--out reports/prefix]");
   const out = opt("--out") ?? "reports/tracking-price-diff";
 
   const [header, ...data] = parseCsv(readFileSync(file, "utf8"));

@@ -40,15 +40,15 @@ and tell the user the path. Never overwrite the input file.
    From the project root:
 
    ```bash
-   npx tsx src/fetch_listing_images.ts --account <store> --out <scratchpad>/imgs "<input.csv>"
+   npx tsx src/listings/fetch_listing_images.ts --account <store> --out <scratchpad>/imgs "<input.csv>"
    ```
 
    It calls GetItem (read-only) per item, saves the main photo as
    `<out>/<itemId>_1.jpg` and prints `itemId  seller  ack  pictureCount  title`.
    Add `--all` only if the user asks to check every photo, not just the main one.
    If `credentials.json` says it has no "accounts" object, it is in the old
-   layout: run `npx tsx src/ebay_auth.ts status` and see the header of
-   `src/ebay_auth.ts` for the layout (back the file up before converting; never
+   layout: run `npx tsx src/auth/ebay_auth.ts status` and see the header of
+   `src/auth/ebay_auth.ts` for the layout (back the file up before converting; never
    print token values).
 3. **Look at each photo** with the Read tool (batch them in parallel) and decide.
 4. **Write the output CSV** and report a short tally plus anything odd.

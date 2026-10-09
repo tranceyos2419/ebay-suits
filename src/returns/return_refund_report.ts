@@ -11,12 +11,12 @@
  *               history (eBay's deduction on a returned-item refund)
  *
  * Usage:
- *   npx tsx src/return_refund_report.ts --account <name> [--days N] [--json]
+ *   npx tsx src/returns/return_refund_report.ts --account <name> [--days N] [--json]
  */
 
-import { accountFromArgs, authnAuthToken, die } from "./ebay_auth.ts";
-import { postOrderGet } from "./post_order_api.ts";
-import { DAY_MS, runMain } from "./util.ts";
+import { accountFromArgs, authnAuthToken, die } from "../auth/ebay_auth.ts";
+import { postOrderGet } from "../lib/post_order_api.ts";
+import { DAY_MS, runMain } from "../lib/util.ts";
 
 interface Figures {
   returnId: string;

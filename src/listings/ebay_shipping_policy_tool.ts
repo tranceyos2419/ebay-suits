@@ -8,10 +8,10 @@
  *
  * Auth
  * ----
- * Every command needs --account <name>; tokens come from src/ebay_auth.ts:
+ * Every command needs --account <name>; tokens come from src/auth/ebay_auth.ts:
  *   - Account API (list-policies, swap-rate-table): an OAuth user token with
  *     scope sell.account, refreshed automatically. The account needs an
- *     OAuth sign-in first (src/ebay_login.ts).
+ *     OAuth sign-in first (src/auth/ebay_login.ts).
  *   - Trading API (everything else): the account's Auth'n'Auth token.
  * With --sandbox, credentials.json isn't used (it holds Production tokens):
  * put a Sandbox user token in EBAY_SANDBOX_TOKEN instead of --account.
@@ -19,22 +19,22 @@
  * Usage
  * -----
  *   # 1. See your policies and their IDs
- *   npx tsx src/ebay_shipping_policy_tool.ts --account jdm-direct-motors list-policies
+ *   npx tsx src/listings/ebay_shipping_policy_tool.ts --account jdm-direct-motors list-policies
  *
  *   # 2. Confirm you can read listings, and that an edit WOULD succeed, without
  *   #    changing anything (uses GetItem [read] + VerifyReviseItem [validate-only]).
- *   npx tsx src/ebay_shipping_policy_tool.ts --account jdm-direct-motors check-access \
+ *   npx tsx src/listings/ebay_shipping_policy_tool.ts --account jdm-direct-motors check-access \
  *       --item-ids 110123456789 110987654321 \
  *       --policy-id 123456789012
  *
  *   # 3. Apply a policy to specific listings (dry run first!)
- *   npx tsx src/ebay_shipping_policy_tool.ts --account jdm-direct-motors revise-items \
+ *   npx tsx src/listings/ebay_shipping_policy_tool.ts --account jdm-direct-motors revise-items \
  *       --policy-id 123456789012 \
  *       --item-ids 110123456789 110987654321 \
  *       --dry-run
  *
  *   # Then actually apply it:
- *   npx tsx src/ebay_shipping_policy_tool.ts --account jdm-direct-motors revise-items \
+ *   npx tsx src/listings/ebay_shipping_policy_tool.ts --account jdm-direct-motors revise-items \
  *       --policy-id 123456789012 \
  *       --item-ids 110123456789 110987654321
  *
@@ -56,7 +56,7 @@
  *   # scan for that part, which is capped at 25,000 active listings by
  *   # GetMyeBaySelling (see the NOTE above scanActiveListings in the source
  *   # for why that matters on a larger store).
- *   npx tsx src/ebay_shipping_policy_tool.ts --account jdm-direct-motors migrate-by-price \
+ *   npx tsx src/listings/ebay_shipping_policy_tool.ts --account jdm-direct-motors migrate-by-price \
  *       --from-policy-id 273300062012 272284104012 272285920012 \
  *       --report-out reports/copy-cleanup.csv \
  *       --items-file express_items.csv \
@@ -66,7 +66,7 @@
  *   #    MATCH are revised; NO_MATCH rows are always left alone). No need to
  *   #    repeat --from-policy-id here -- the source policy for each row is
  *   #    read back from the report itself.
- *   npx tsx src/ebay_shipping_policy_tool.ts --account jdm-direct-motors migrate-by-price \
+ *   npx tsx src/listings/ebay_shipping_policy_tool.ts --account jdm-direct-motors migrate-by-price \
  *       --report-out reports/copy-cleanup.csv \
  *       --apply
  *
@@ -78,7 +78,7 @@
  *   #    see the NOTE above scanActiveListings. Optional --name-contains
  *   #    filters the printed list (case-insensitive substring on the policy
  *   #    name); omit it to see everything found.
- *   npx tsx src/ebay_shipping_policy_tool.ts --account jdm-direct-motors scan-policies --name-contains copy
+ *   npx tsx src/listings/ebay_shipping_policy_tool.ts --account jdm-direct-motors scan-policies --name-contains copy
  *
  * Flags
  * -----
@@ -105,9 +105,9 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { findBlocks, findText } from "./xml_util.ts";
-import { accountFromArgs, authnAuthToken, die, oauthToken } from "./ebay_auth.ts";
-import { csvCell, parseCsv } from "./csv.ts";
+import { findBlocks, findText } from "../lib/xml_util.ts";
+import { accountFromArgs, authnAuthToken, die, oauthToken } from "../auth/ebay_auth.ts";
+import { csvCell, parseCsv } from "../lib/csv.ts";
 import {
   TRADING_API,
   TRADING_API_SANDBOX,
@@ -115,8 +115,8 @@ import {
   tradingCall,
   tradingRequestXml,
   type TradingResponse,
-} from "./trading_api.ts";
-import { runMain, sleep } from "./util.ts";
+} from "../lib/trading_api.ts";
+import { runMain, sleep } from "../lib/util.ts";
 
 type Env = "prod" | "sandbox";
 

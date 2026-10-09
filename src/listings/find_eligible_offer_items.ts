@@ -10,15 +10,15 @@
  * price / watch count via the Trading API's GetItem (skip with --no-details).
  *
  * TOKENS -- two different ones, because these are two different APIs; both
- * come from src/ebay_auth.ts for the --account given:
+ * come from src/auth/ebay_auth.ts for the --account given:
  *   findEligibleItems    OAuth user token with scope sell.negotiation (REST;
  *                        an Auth'n'Auth token gets 403 "Insufficient
  *                        permissions" here). Refreshed automatically; the
- *                        account needs an OAuth sign-in (src/ebay_login.ts).
+ *                        account needs an OAuth sign-in (src/auth/ebay_login.ts).
  *   GetItem / GetSellerList  the account's Auth'n'Auth token (Trading API).
  *
  * Usage:
- *   npx tsx src/find_eligible_offer_items.ts --account <name> [options]
+ *   npx tsx src/listings/find_eligible_offer_items.ts --account <name> [options]
  *
  * Options:
  *   --source WHICH     'negotiation' (default, authoritative) or 'watchers'
@@ -49,11 +49,11 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { findBlocks, findText } from "./xml_util.ts";
-import { accountFromArgs, authnAuthToken, die, oauthToken } from "./ebay_auth.ts";
-import { csvCell } from "./csv.ts";
-import { tradingCall, unescapeXml } from "./trading_api.ts";
-import { DAY_MS, runMain, sleep } from "./util.ts";
+import { findBlocks, findText } from "../lib/xml_util.ts";
+import { accountFromArgs, authnAuthToken, die, oauthToken } from "../auth/ebay_auth.ts";
+import { csvCell } from "../lib/csv.ts";
+import { tradingCall, unescapeXml } from "../lib/trading_api.ts";
+import { DAY_MS, runMain, sleep } from "../lib/util.ts";
 
 const NEGOTIATION_BASE = "https://api.ebay.com/sell/negotiation/v1";
 const PAGE_LIMIT = 200; // findEligibleItems max page size
@@ -163,7 +163,7 @@ function parseArgs(account: string, argv: string[]): Options {
         break;
       case "-h":
       case "--help":
-        console.log("See the header comment in src/find_eligible_offer_items.ts for usage.");
+        console.log("See the header comment in src/listings/find_eligible_offer_items.ts for usage.");
         process.exit(0);
       default:
         die(`ERROR: unknown argument '${arg}'`);
@@ -193,7 +193,7 @@ async function fetchEligiblePage(
     if (resp.status === 401 || resp.status === 403) {
       console.error(
         "\nThis call needs an OAuth user token granted the sell.negotiation scope.\n" +
-          "Check the account's sign-in with: npx tsx src/ebay_auth.ts status"
+          "Check the account's sign-in with: npx tsx src/auth/ebay_auth.ts status"
       );
     }
     process.exit(1);

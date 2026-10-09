@@ -5,16 +5,16 @@
  * compared and drilled into.
  *
  * Usage:
- *   npx tsx src/weekly_revenue.ts --account <name> [WEEKS] [--json out.json]
+ *   npx tsx src/sales/weekly_revenue.ts --account <name> [WEEKS] [--json out.json]
  *
  * WEEKS defaults to 8 (complete weeks back from the most recent Monday).
  */
 
 import { writeFileSync } from "node:fs";
-import { findBlocks, findText } from "./xml_util.ts";
-import { accountFromArgs, authnAuthToken } from "./ebay_auth.ts";
-import { fetchOrderBlocks, money, num } from "./trading_api.ts";
-import { runMain } from "./util.ts";
+import { findBlocks, findText } from "../lib/xml_util.ts";
+import { accountFromArgs, authnAuthToken } from "../auth/ebay_auth.ts";
+import { fetchOrderBlocks, money, num } from "../lib/trading_api.ts";
+import { runMain } from "../lib/util.ts";
 
 interface Txn {
   itemId: string;

@@ -10,9 +10,9 @@
  * ~/Library/Logs/ebay-suits-cleanup-reports.log).
  *
  * Usage:
- *   npx tsx src/cleanup_reports.ts [--months N] [--dry-run]
- *   npx tsx src/cleanup_reports.ts --install     # schedule the 1st of each month at 09:00
- *   npx tsx src/cleanup_reports.ts --uninstall
+ *   npx tsx src/maintenance/cleanup_reports.ts [--months N] [--dry-run]
+ *   npx tsx src/maintenance/cleanup_reports.ts --install     # schedule the 1st of each month at 09:00
+ *   npx tsx src/maintenance/cleanup_reports.ts --uninstall
  */
 
 import { execFileSync } from "node:child_process";
@@ -21,7 +21,7 @@ import { homedir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const PROJECT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const PROJECT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const REPORTS_DIR = join(PROJECT_DIR, "reports");
 const LABEL = "com.ebay-suits.cleanup-reports";
 const PLIST_PATH = join(homedir(), "Library", "LaunchAgents", `${LABEL}.plist`);
@@ -74,7 +74,7 @@ function install(): void {
   <array>
     <string>${node}</string>
     <string>${tsxCli}</string>
-    <string>${join(PROJECT_DIR, "src", "cleanup_reports.ts")}</string>
+    <string>${join(PROJECT_DIR, "src", "maintenance", "cleanup_reports.ts")}</string>
   </array>
   <key>WorkingDirectory</key><string>${PROJECT_DIR}</string>
   <key>StartCalendarInterval</key>
