@@ -11,26 +11,9 @@
 
 import { readFileSync } from "node:fs";
 import ExcelJS from "exceljs";
-
-function parseCsv(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [], cur = "", q = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (q) {
-      if (c === '"' && text[i + 1] === '"') { cur += '"'; i++; }
-      else if (c === '"') q = false;
-      else cur += c;
-    } else if (c === '"') q = true;
-    else if (c === ",") { row.push(cur); cur = ""; }
-    else if (c === "\n" || c === "\r") {
-      if (c === "\r" && text[i + 1] === "\n") i++;
-      row.push(cur); cur = ""; rows.push(row); row = [];
-    } else cur += c;
-  }
-  if (cur || row.length) { row.push(cur); rows.push(row); }
-  return rows.filter((r) => r.some((v) => v !== ""));
-}
+import { die } from "./ebay_auth.ts";
+import { parseCsv } from "./csv.ts";
+import { runMain } from "./util.ts";
 
 const WIDTHS = [26, 22, 24, 18, 20, 12, 22];
 
@@ -53,10 +36,7 @@ function addSheet(wb: ExcelJS.Workbook, name: string, csvPath: string) {
 
 async function main() {
   const [prefix, out] = process.argv.slice(2);
-  if (!prefix || !out) {
-    console.error("Usage: npx tsx src/build_price_tracker_xlsx.ts <prefix> <output.xlsx>");
-    process.exit(1);
-  }
+  if (!prefix || !out) die("Usage: npx tsx src/build_price_tracker_xlsx.ts <prefix> <output.xlsx>");
   const wb = new ExcelJS.Workbook();
   const a = addSheet(wb, "Tracking Page Price", `${prefix}-tracking-page-price.csv`);
   const d = addSheet(wb, "Deactivate", `${prefix}-deactivate.csv`);
@@ -64,7 +44,4 @@ async function main() {
   console.log(`Wrote ${out}: Tracking Page Price ${a} rows, Deactivate ${d} rows`);
 }
 
-main().catch((e) => {
-  console.error(e instanceof Error ? e.message : e);
-  process.exit(1);
-});
+runMain(main);

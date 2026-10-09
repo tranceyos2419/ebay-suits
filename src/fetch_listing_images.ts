@@ -15,28 +15,11 @@
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { findBlocks, findErrors, findText } from "./xml_util.ts";
-import { accountFromArgs, authnAuthToken } from "./ebay_auth.ts";
-
-async function getItem(token: string, itemId: string): Promise<string> {
-  const xmlBody = `<?xml version="1.0" encoding="utf-8"?>
-<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-  <ItemID>${itemId}</ItemID>
-  <DetailLevel>ReturnAll</DetailLevel>
-</GetItemRequest>`;
-  const resp = await fetch("https://api.ebay.com/ws/api.dll", {
-    method: "POST",
-    headers: {
-      "Content-Type": "text/xml",
-      "X-EBAY-API-SITEID": "0",
-      "X-EBAY-API-COMPATIBILITY-LEVEL": "1193",
-      "X-EBAY-API-CALL-NAME": "GetItem",
-      "X-EBAY-API-IAF-TOKEN": token,
-    },
-    body: xmlBody,
-  });
-  return resp.text();
-}
+import { findBlocks, findText } from "./xml_util.ts";
+import { accountFromArgs, authnAuthToken, die } from "./ebay_auth.ts";
+import { parseCsv } from "./csv.ts";
+import { tradingCall } from "./trading_api.ts";
+import { runMain } from "./util.ts";
 
 async function main() {
   const { account, rest } = accountFromArgs(process.argv.slice(2));
@@ -48,30 +31,24 @@ async function main() {
     else if (rest[i] === "--all") all = true;
     else csvPath = rest[i];
   }
-  if (!outDir || !csvPath) {
-    console.error("Usage: npx tsx src/fetch_listing_images.ts --account <name> --out <dir> [--all] <input.csv>");
-    process.exit(1);
-  }
+  if (!outDir || !csvPath) die("Usage: npx tsx src/fetch_listing_images.ts --account <name> --out <dir> [--all] <input.csv>");
   mkdirSync(outDir, { recursive: true });
 
-  const ids = readFileSync(csvPath, "utf8")
-    .split(/\r?\n/)
+  const ids = parseCsv(readFileSync(csvPath, "utf8"))
     .slice(1)
-    .map((line) => line.split(",")[0].trim())
+    .map((row) => (row[0] ?? "").trim())
     .filter(Boolean);
 
   const token = authnAuthToken(account);
   for (const id of ids) {
-    const body = await getItem(token, id);
-    const ack = findText(body, "Ack") ?? "Unknown";
-    const errs = findErrors(body);
-    if (ack !== "Success" && ack !== "Warning") {
-      console.log(`${id}\t-\t${ack}\t0\t${errs.map((e) => e.short).join("; ")}`);
+    const r = await tradingCall(token, "GetItem", `  <ItemID>${id}</ItemID>\n  <DetailLevel>ReturnAll</DetailLevel>`);
+    if (!r.ok) {
+      console.log(`${id}\t-\t${r.ack}\t0\t${r.errors.map((e) => e.short).join("; ")}`);
       continue;
     }
-    const seller = findText(findBlocks(body, "Seller")[0] ?? "", "UserID") ?? "?";
-    const title = findText(body, "Title") ?? "";
-    const pictureBlock = findBlocks(body, "PictureDetails")[0] ?? "";
+    const seller = findText(findBlocks(r.xml, "Seller")[0] ?? "", "UserID") ?? "?";
+    const title = findText(r.xml, "Title") ?? "";
+    const pictureBlock = findBlocks(r.xml, "PictureDetails")[0] ?? "";
     const urls = [...pictureBlock.matchAll(/<PictureURL>([^<]+)<\/PictureURL>/g)].map((m) => m[1].replace(/&amp;/g, "&"));
     const wanted = all ? urls : urls.slice(0, 1);
     for (let n = 0; n < wanted.length; n++) {
@@ -80,8 +57,8 @@ async function main() {
       const img = await fetch(full);
       if (img.ok) writeFileSync(join(outDir, `${id}_${n + 1}.jpg`), Buffer.from(await img.arrayBuffer()));
     }
-    console.log(`${id}\t${seller}\t${ack}\t${urls.length}\t${title}`);
+    console.log(`${id}\t${seller}\t${r.ack}\t${urls.length}\t${title}`);
   }
 }
 
-main();
+runMain(main);

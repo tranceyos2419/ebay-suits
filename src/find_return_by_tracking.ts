@@ -21,9 +21,10 @@
  * which the Post-Order API takes as `Authorization: TOKEN <token>`.
  */
 
-import { accountFromArgs, authnAuthToken } from "./ebay_auth.ts";
+import { accountFromArgs, authnAuthToken, die } from "./ebay_auth.ts";
+import { postOrderGet } from "./post_order_api.ts";
+import { DAY_MS, mapLimit, normalizeTracking as normalize, runMain } from "./util.ts";
 
-const BASE = "https://api.ebay.com/post-order/v2";
 const PAGE_LIMIT = 50;
 const CONCURRENCY = 5;
 
@@ -50,11 +51,6 @@ interface TrackingHit {
   carrier?: string;
 }
 
-/** Strip formatting so "1Z 999 AA1" and "1z999aa1" compare equal. */
-function normalize(s: string): string {
-  return s.replace(/[^0-9a-z]/gi, "").toUpperCase();
-}
-
 function parseArgs(argv: string[]): Options {
   const opts: Options = { marketplace: "EBAY_US", list: false, days: 730 };
   for (let i = 0; i < argv.length; i++) {
@@ -63,45 +59,18 @@ function parseArgs(argv: string[]): Options {
     else if (a === "--list") opts.list = true;
     else if (a === "--days") {
       opts.days = Number(argv[++i]);
-      if (!Number.isFinite(opts.days) || opts.days <= 0) {
-        console.error("ERROR: --days needs a positive number");
-        process.exit(1);
-      }
-    }
-    else if (a.startsWith("--")) {
-      console.error(`ERROR: unknown flag ${a}`);
-      process.exit(1);
-    } else if (opts.tracking === undefined) opts.tracking = a;
-    else {
-      console.error(`ERROR: unexpected extra argument ${a}`);
-      process.exit(1);
-    }
+      if (!Number.isFinite(opts.days) || opts.days <= 0) die("ERROR: --days needs a positive number");
+    } else if (a.startsWith("--")) die(`ERROR: unknown flag ${a}`);
+    else if (opts.tracking === undefined) opts.tracking = a;
+    else die(`ERROR: unexpected extra argument ${a}`);
   }
   if (!opts.tracking && !opts.list) {
-    console.error(
+    die(
       "Usage: npx tsx src/find_return_by_tracking.ts <tracking-number> --account <name> [--days N]\n" +
         "       npx tsx src/find_return_by_tracking.ts --account <name> --list [--days N]"
     );
-    process.exit(1);
   }
   return opts;
-}
-
-async function getJson(url: string, token: string): Promise<any> {
-  const resp = await fetch(url, {
-    headers: {
-      Authorization: `TOKEN ${token}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      "X-EBAY-C-MARKETPLACE-ID": process.env.EBAY_MARKETPLACE ?? "EBAY_US",
-    },
-  });
-  const text = await resp.text();
-  if (!resp.ok) {
-    console.error(`ERROR ${resp.status} from ${url}\n${text.slice(0, 1000)}`);
-    process.exit(1);
-  }
-  return JSON.parse(text);
 }
 
 /**
@@ -124,16 +93,16 @@ async function fetchAllReturns(
   const WINDOW_DAYS = 30;
 
   for (let start = 0; start < days; start += WINDOW_DAYS) {
-    const to = new Date(Date.now() - start * 86_400_000).toISOString();
-    const from = new Date(Date.now() - Math.min(start + WINDOW_DAYS, days) * 86_400_000).toISOString();
+    const to = new Date(Date.now() - start * DAY_MS).toISOString();
+    const from = new Date(Date.now() - Math.min(start + WINDOW_DAYS, days) * DAY_MS).toISOString();
 
     for (let offset = 0; ; ) {
-      const url =
-        `${BASE}/return/search?role=SELLER&limit=${PAGE_LIMIT}&offset=${offset}` +
+      const path =
+        `/return/search?role=SELLER&limit=${PAGE_LIMIT}&offset=${offset}` +
         `&marketplace_id=${marketplace}` +
         `&creation_date_range_from=${encodeURIComponent(from)}` +
         `&creation_date_range_to=${encodeURIComponent(to)}`;
-      const body = await getJson(url, token);
+      const body = await postOrderGet(path, token, marketplace);
       const members: any[] = body.members ?? [];
       if (members.length === 0) break;
 
@@ -195,21 +164,6 @@ function collectTracking(node: unknown, path = ""): TrackingHit[] {
   return hits;
 }
 
-/** Run `worker` over `items`, at most CONCURRENCY in flight at once. */
-async function mapLimit<T, R>(items: T[], worker: (item: T) => Promise<R>): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  let next = 0;
-  const runners = Array.from({ length: Math.min(CONCURRENCY, items.length) }, async () => {
-    for (;;) {
-      const i = next++;
-      if (i >= items.length) return;
-      results[i] = await worker(items[i]);
-    }
-  });
-  await Promise.all(runners);
-  return results;
-}
-
 function describe(r: ReturnSummary, hits: TrackingHit[], rawMatch: boolean): string {
   const lines = [
     `  Order number:   ${r.orderId ?? "(none)"}`,
@@ -234,7 +188,6 @@ async function main() {
   const { account, rest } = accountFromArgs(process.argv.slice(2));
   const opts = parseArgs(rest);
   const token = authnAuthToken(account);
-  process.env.EBAY_MARKETPLACE = opts.marketplace;
   const target = opts.tracking ? normalize(opts.tracking) : undefined;
 
   const returns = await fetchAllReturns(token, opts.marketplace, opts.days);
@@ -242,8 +195,8 @@ async function main() {
     `Scanning ${returns.length} returns on ${account} (last ${opts.days} days)...`
   );
 
-  const scanned = await mapLimit(returns, async (r) => {
-    const detail = await getJson(`${BASE}/return/${r.returnId}`, token);
+  const scanned = await mapLimit(returns, CONCURRENCY, async (r) => {
+    const detail = await postOrderGet(`/return/${r.returnId}`, token, opts.marketplace);
     const hits = collectTracking(detail);
     // Belt and braces: also look at the raw record, in case eBay parks the
     // number somewhere without "tracking" in the key name.
@@ -277,7 +230,4 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+runMain(main);

@@ -10,9 +10,9 @@
  * the `Authorization: TOKEN <token>` header.
  */
 
-import { accountFromArgs, authnAuthToken } from "./ebay_auth.ts";
-
-const ENDPOINT = "https://api.ebay.com/post-order/v2/return/search";
+import { accountFromArgs, authnAuthToken, die } from "./ebay_auth.ts";
+import { postOrderGet } from "./post_order_api.ts";
+import { DAY_MS, runMain } from "./util.ts";
 
 interface Args {
   days: number;
@@ -29,10 +29,7 @@ function parseArgs(argv: string[]): Args {
     else if (a === "--state") args.state = argv[++i].toUpperCase();
     else if (a === "--limit") args.limit = parseInt(argv[++i], 10);
     else if (a === "--json") args.json = true;
-    else {
-      console.error(`Unknown argument: ${a}`);
-      process.exit(1);
-    }
+    else die(`Unknown argument: ${a}`);
   }
   return args;
 }
@@ -61,7 +58,7 @@ async function main() {
   const args = parseArgs(rest);
   const token = authnAuthToken(account);
 
-  const from = new Date(Date.now() - args.days * 24 * 60 * 60 * 1000);
+  const from = new Date(Date.now() - args.days * DAY_MS);
 
   async function fetchPage(page: number): Promise<any> {
     const params = new URLSearchParams({
@@ -72,21 +69,7 @@ async function main() {
     });
     if (args.state && args.state !== "ALL") params.set("return_state", args.state);
 
-    const resp = await fetch(`${ENDPOINT}?${params}`, {
-      headers: {
-        Authorization: `TOKEN ${token}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
-      },
-    });
-    const text = await resp.text();
-    if (!resp.ok) {
-      console.error(`HTTP ${resp.status} ${resp.statusText}`);
-      console.error(text.slice(0, 2000));
-      process.exit(1);
-    }
-    return JSON.parse(text);
+    return postOrderGet(`/return/search?${params}`, token);
   }
 
   // The Post-Order API paginates by page number (1-based), not record offset.
@@ -114,7 +97,7 @@ async function main() {
 
   const members: any[] = data.members ?? [];
   console.log(
-    `Return requests for jdm-direct-motors (last ${args.days} days, state=${args.state}): ` +
+    `Return requests for ${account} (last ${args.days} days, state=${args.state}): ` +
       `${members.length} of ${data.total ?? members.length}`
   );
 
@@ -142,7 +125,4 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+runMain(main);

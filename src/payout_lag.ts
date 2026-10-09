@@ -18,10 +18,10 @@
 
 import { writeFileSync } from "node:fs";
 import { accountFromArgs, die, oauthToken } from "./ebay_auth.ts";
+import { DAY_MS, runMain } from "./util.ts";
 
 const FINANCES_API = "https://apiz.ebay.com/sell/finances/v1";
 const FINANCES_SCOPE = "sell.finances";
-const DAY_MS = 86_400_000;
 
 interface Payout {
   payoutId: string;
@@ -132,4 +132,4 @@ async function main(): Promise<void> {
   }
 }
 
-main();
+runMain(main);

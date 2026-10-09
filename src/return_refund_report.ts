@@ -14,10 +14,9 @@
  *   npx tsx src/return_refund_report.ts --account <name> [--days N] [--json]
  */
 
-import { accountFromArgs, authnAuthToken } from "./ebay_auth.ts";
-
-const SEARCH = "https://api.ebay.com/post-order/v2/return/search";
-const DETAIL = "https://api.ebay.com/post-order/v2/return";
+import { accountFromArgs, authnAuthToken, die } from "./ebay_auth.ts";
+import { postOrderGet } from "./post_order_api.ts";
+import { DAY_MS, runMain } from "./util.ts";
 
 interface Figures {
   returnId: string;
@@ -33,22 +32,6 @@ interface Figures {
   amount?: number;
   amountIsActual: boolean;
   deduction?: number;
-}
-
-function headers(token: string) {
-  return {
-    Authorization: `TOKEN ${token}`,
-    "Content-Type": "application/json",
-    Accept: "application/json",
-    "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
-  };
-}
-
-async function getJson(url: string, token: string): Promise<any> {
-  const resp = await fetch(url, { headers: headers(token) });
-  const text = await resp.text();
-  if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${url}: ${text.slice(0, 500)}`);
-  return JSON.parse(text);
 }
 
 function figuresFor(detail: any): Figures {
@@ -94,15 +77,12 @@ async function main() {
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--days") days = parseInt(argv[++i], 10);
     else if (argv[i] === "--json") json = true;
-    else {
-      console.error(`Unknown argument: ${argv[i]}`);
-      process.exit(1);
-    }
+    else die(`Unknown argument: ${argv[i]}`);
   }
 
   const token = authnAuthToken(account);
 
-  const from = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  const from = new Date(Date.now() - days * DAY_MS).toISOString();
   const ids: string[] = [];
   let page = 1;
   for (;;) {
@@ -112,7 +92,7 @@ async function main() {
       offset: String(page),
       creation_date_range_from: from,
     });
-    const data = await getJson(`${SEARCH}?${params}`, token);
+    const data = await postOrderGet(`/return/search?${params}`, token);
     const fresh = (data.members ?? []).map((m: any) => m.returnId).filter((id: string) => !ids.includes(id));
     ids.push(...fresh);
     if (fresh.length === 0 || page >= (data.paginationOutput?.totalPages ?? 1)) break;
@@ -121,7 +101,7 @@ async function main() {
 
   const rows: Figures[] = [];
   for (const id of ids) {
-    rows.push(figuresFor(await getJson(`${DETAIL}/${id}`, token)));
+    rows.push(figuresFor(await postOrderGet(`/return/${id}`, token)));
   }
   rows.sort((a, b) => b.created.localeCompare(a.created));
 
@@ -150,7 +130,4 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+runMain(main);

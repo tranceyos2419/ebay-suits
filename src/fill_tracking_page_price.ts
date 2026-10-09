@@ -18,8 +18,10 @@ import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { findErrors, findText } from "./xml_util.ts";
-import { accountFromArgs, authnAuthToken } from "./ebay_auth.ts";
+import { findText } from "./xml_util.ts";
+import { accountFromArgs, authnAuthToken, die } from "./ebay_auth.ts";
+import { tradingCall } from "./trading_api.ts";
+import { mapLimit, runMain, sleep } from "./util.ts";
 
 const TRACK_COLS = ["Q","R","S","T","U","V","W","X","Y","Z","AA","AB","AC","AD","AE","AF","AG","AH","AI","AJ"];
 
@@ -39,35 +41,19 @@ function parseRows(xml: string, shared: string[]) {
 }
 
 async function getPrice(itemId: string, token: string): Promise<{ price?: number; note?: string }> {
-  const body = `<?xml version="1.0" encoding="utf-8"?>
-<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents"><ItemID>${itemId}</ItemID><DetailLevel>ReturnAll</DetailLevel></GetItemRequest>`;
   for (let attempt = 0; attempt < 3; attempt++) {
-    const resp = await fetch("https://api.ebay.com/ws/api.dll", {
-      method: "POST",
-      headers: {
-        "Content-Type": "text/xml",
-        "X-EBAY-API-SITEID": "0",
-        "X-EBAY-API-COMPATIBILITY-LEVEL": "1193",
-        "X-EBAY-API-CALL-NAME": "GetItem",
-        "X-EBAY-API-IAF-TOKEN": token,
-      },
-      body,
-    });
-    const xml = await resp.text();
-    const ack = findText(xml, "Ack");
-    if (ack === "Success" || ack === "Warning") {
-      const status = findText(xml, "ListingStatus");
-      const prices = [...xml.matchAll(/<(?:CurrentPrice|StartPrice)[^>]*>([\d.]+)</g)].map((m) => Number(m[1]));
-      const price = prices.length ? Math.min(...prices) : undefined;
-      if (price === undefined) return { note: "no price in response" };
-      return { price, note: status && status !== "Active" ? `Listing ${status}` : undefined };
+    const r = await tradingCall(token, "GetItem", `<ItemID>${itemId}</ItemID><DetailLevel>ReturnAll</DetailLevel>`);
+    if (r.ok) {
+      const status = findText(r.xml, "ListingStatus");
+      const prices = [...r.xml.matchAll(/<(?:CurrentPrice|StartPrice)[^>]*>([\d.]+)</g)].map((m) => Number(m[1]));
+      if (!prices.length) return { note: "no price in response" };
+      return { price: Math.min(...prices), note: status && status !== "Active" ? `Listing ${status}` : undefined };
     }
-    const errs = findErrors(xml);
-    if (errs.some((e) => /rate|limit|exceeded|temporar/i.test(e.long + e.short))) {
-      await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+    if (r.errors.some((e) => /rate|limit|exceeded|temporar/i.test(e.long + e.short))) {
+      await sleep(2000 * (attempt + 1));
       continue;
     }
-    return { note: errs[0]?.short ?? `HTTP ${resp.status}` };
+    return { note: r.errors[0]?.short ?? `HTTP ${r.status}` };
   }
   return { note: "API retries exhausted" };
 }
@@ -77,10 +63,7 @@ async function main() {
   const ti = rest.indexOf("--threshold");
   const threshold = ti >= 0 ? Number(rest[ti + 1]) : 9;
   const file = resolve(rest.filter((a, i) => !a.startsWith("--") && (ti < 0 || i !== ti + 1))[0] ?? "");
-  if (!existsSync(file)) {
-    console.error("Usage: npx tsx src/fill_tracking_page_price.ts --account <name> <file.xlsx> [--threshold 9] [--drop-example]");
-    process.exit(1);
-  }
+  if (!existsSync(file)) die("Usage: npx tsx src/fill_tracking_page_price.ts --account <name> <file.xlsx> [--threshold 9] [--drop-example]");
   const token = authnAuthToken(account);
 
   const dir = mkdtempSync(join(tmpdir(), "xlsx-"));
@@ -111,15 +94,7 @@ async function main() {
   console.log(`${pairs.length} tracking pages, ${todo.length} to fill`);
 
   const results = new Map<string, { price?: number; note?: string }>();
-  let next = 0;
-  await Promise.all(
-    Array.from({ length: 5 }, async () => {
-      while (next < todo.length) {
-        const p = todo[next++];
-        results.set(p.track, await getPrice(p.track, token));
-      }
-    }),
-  );
+  await mapLimit(todo, 5, async (p) => results.set(p.track, await getPrice(p.track, token)));
 
   // Sheets can ship with blank pre-formatted rows; drop those and append right after the last row with data.
   const rowRe = /<row r="(\d+)"[^>]*?(?:\/>|>(.*?)<\/row>)/gs;
@@ -160,7 +135,4 @@ async function main() {
   console.log(`Filled ${todo.length} rows: ${yes} Deactivate=Yes, ${missing} lookup failures. Saved ${file}`);
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+runMain(main);

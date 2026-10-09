@@ -49,11 +49,13 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { findText, findErrors, findBlocks } from "./xml_util.ts";
-import { accountFromArgs, authnAuthToken, oauthToken } from "./ebay_auth.ts";
+import { findBlocks, findText } from "./xml_util.ts";
+import { accountFromArgs, authnAuthToken, die, oauthToken } from "./ebay_auth.ts";
+import { csvCell } from "./csv.ts";
+import { tradingCall, unescapeXml } from "./trading_api.ts";
+import { DAY_MS, runMain, sleep } from "./util.ts";
 
 const NEGOTIATION_BASE = "https://api.ebay.com/sell/negotiation/v1";
-const TRADING_API = "https://api.ebay.com/ws/api.dll";
 const PAGE_LIMIT = 200; // findEligibleItems max page size
 const DETAIL_DELAY_MS = 120; // be gentle: one GetItem per eligible listing
 const NEGOTIATION_SCOPE = "sell.negotiation";
@@ -84,6 +86,23 @@ interface ItemDetail {
   viewUrl: string;
 }
 
+/** A row for a listing whose details are unknown. */
+function blankItem(listingId: string): ItemDetail {
+  return {
+    listingId,
+    title: "",
+    price: NaN,
+    currency: "",
+    quantityAvailable: NaN,
+    watchCount: NaN,
+    listingType: "",
+    site: "",
+    bestOfferEnabled: false,
+    sku: "",
+    viewUrl: `https://www.ebay.com/itm/${listingId}`,
+  };
+}
+
 function parseArgs(account: string, argv: string[]): Options {
   const opts: Options = {
     source: "negotiation",
@@ -102,8 +121,7 @@ function parseArgs(account: string, argv: string[]): Options {
     const next = () => {
       const v = argv[++i];
       if (v === undefined) {
-        console.error(`ERROR: ${arg} needs a value`);
-        process.exit(1);
+        die(`ERROR: ${arg} needs a value`);
       }
       return v;
     };
@@ -111,8 +129,7 @@ function parseArgs(account: string, argv: string[]): Options {
       case "--source": {
         const v = next();
         if (v !== "negotiation" && v !== "watchers") {
-          console.error("ERROR: --source must be 'negotiation' or 'watchers'");
-          process.exit(1);
+          die("ERROR: --source must be 'negotiation' or 'watchers'");
         }
         opts.source = v;
         break;
@@ -149,24 +166,10 @@ function parseArgs(account: string, argv: string[]): Options {
         console.log("See the header comment in src/find_eligible_offer_items.ts for usage.");
         process.exit(0);
       default:
-        console.error(`ERROR: unknown argument '${arg}'`);
-        process.exit(1);
+        die(`ERROR: unknown argument '${arg}'`);
     }
   }
   return opts;
-}
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/** Undo the XML entity escaping eBay applies to titles. */
-function unescapeXml(s: string): string {
-  return s
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&#0?39;/g, "'")
-    .replace(/&amp;/g, "&");
 }
 
 /** One page of eligible listing ids. */
@@ -232,47 +235,20 @@ async function fetchItemDetail(
   siteId: number,
   listingId: string
 ): Promise<ItemDetail> {
-  const xmlBody = `<?xml version="1.0" encoding="utf-8"?>
-<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-  <ItemID>${listingId}</ItemID>
+  const r = await tradingCall(
+    token,
+    "GetItem",
+    `  <ItemID>${listingId}</ItemID>
   <IncludeWatchCount>true</IncludeWatchCount>
-  <DetailLevel>ReturnAll</DetailLevel>
-</GetItemRequest>`;
-
-  const resp = await fetch(TRADING_API, {
-    method: "POST",
-    headers: {
-      "Content-Type": "text/xml",
-      "X-EBAY-API-SITEID": String(siteId),
-      "X-EBAY-API-COMPATIBILITY-LEVEL": "1193",
-      "X-EBAY-API-CALL-NAME": "GetItem",
-      "X-EBAY-API-IAF-TOKEN": token,
-    },
-    body: xmlBody,
-  });
-
-  const blank: ItemDetail = {
-    listingId,
-    title: "",
-    price: NaN,
-    currency: "",
-    quantityAvailable: NaN,
-    watchCount: NaN,
-    listingType: "",
-    site: "",
-    bestOfferEnabled: false,
-    sku: "",
-    viewUrl: `https://www.ebay.com/itm/${listingId}`,
-  };
-
-  const xml = await resp.text();
-  const ack = findText(xml, "Ack") ?? "Unknown";
-  if (ack !== "Success" && ack !== "Warning") {
-    for (const err of findErrors(xml)) {
-      console.error(`  GetItem ${listingId}: ${err.severity}: ${err.short}`);
-    }
+  <DetailLevel>ReturnAll</DetailLevel>`,
+    { siteId }
+  );
+  const blank = blankItem(listingId);
+  if (!r.ok) {
+    for (const err of r.errors) console.error(`  GetItem ${listingId}: ${err.severity}: ${err.short}`);
     return blank;
   }
+  const xml = r.xml;
 
   const priceMatch = xml.match(
     /<(?:\w+:)?CurrentPrice[^>]*currencyID="([^"]*)"[^>]*>([\s\S]*?)<\/(?:\w+:)?CurrentPrice>/
@@ -296,19 +272,6 @@ async function fetchItemDetail(
 const SELLER_LIST_PAGE_SIZE = 200; // GetSellerList max entries per page
 const SELLER_LIST_DELAY_MS = 200;
 
-/**
- * Trading-API stand-in for findEligibleItems: every active listing with at
- * least one watcher, via GetSellerList paged over the listings whose end time
- * falls in the next `days` days (GTC listings renew every 30, so a 40-day
- * window covers the whole store).
- *
- * GetSellerList rather than GetMyeBaySelling on purpose: GetMyeBaySelling's
- * ActiveList silently caps at 25,000 entries, and it applies its sort *within*
- * that cap -- on this store (~96k active listings) a watch-count-descending
- * scan therefore only sees about a quarter of the listings and undercounts by
- * roughly the same factor. GetSellerList has no such cap, at the cost of paging
- * the entire store (~480 calls for 96k listings) instead of stopping early.
- */
 /** Parse one GetSellerList page into the watched-listing rows it contains. */
 function parseSellerListPage(xml: string): { rows: ItemDetail[]; items: number } {
   const rows: ItemDetail[] = [];
@@ -358,35 +321,23 @@ async function fetchSellerListPage(
   to: Date,
   pageNumber: number
 ): Promise<{ xml: string; total: number }> {
-  const xmlBody = `<?xml version="1.0" encoding="utf-8"?>
-<GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-  <EndTimeFrom>${from.toISOString()}</EndTimeFrom>
+  const r = await tradingCall(
+    token,
+    "GetSellerList",
+    `  <EndTimeFrom>${from.toISOString()}</EndTimeFrom>
   <EndTimeTo>${to.toISOString()}</EndTimeTo>
   <IncludeWatchCount>true</IncludeWatchCount>
   <GranularityLevel>Coarse</GranularityLevel>
   <Pagination>
     <EntriesPerPage>${SELLER_LIST_PAGE_SIZE}</EntriesPerPage>
     <PageNumber>${pageNumber}</PageNumber>
-  </Pagination>
-</GetSellerListRequest>`;
-
-  const resp = await fetch(TRADING_API, {
-    method: "POST",
-    headers: {
-      "Content-Type": "text/xml",
-      "X-EBAY-API-SITEID": String(opts.siteId),
-      "X-EBAY-API-COMPATIBILITY-LEVEL": "1193",
-      "X-EBAY-API-CALL-NAME": "GetSellerList",
-      "X-EBAY-API-IAF-TOKEN": token,
-    },
-    body: xmlBody,
-  });
-
-  const xml = await resp.text();
-  const ack = findText(xml, "Ack") ?? "Unknown";
-  if (ack !== "Success" && ack !== "Warning") {
-    console.error(`GetSellerList page ${pageNumber}: Ack=${ack}`);
-    for (const err of findErrors(xml)) console.error(`  ${err.severity}: ${err.short} -- ${err.long}`);
+  </Pagination>`,
+    { siteId: opts.siteId }
+  );
+  const xml = r.xml;
+  if (!r.ok) {
+    console.error(`GetSellerList page ${pageNumber}: Ack=${r.ack}`);
+    for (const err of r.errors) console.error(`  ${err.severity}: ${err.short} -- ${err.long}`);
     process.exit(1);
   }
 
@@ -411,7 +362,7 @@ async function scanWatchedListings(
   opts: Options
 ): Promise<{ rows: ItemDetail[]; scanned: number; total: number }> {
   const from = new Date();
-  const to = new Date(from.getTime() + opts.days * 24 * 60 * 60 * 1000);
+  const to = new Date(from.getTime() + opts.days * DAY_MS);
 
   const first = await fetchSellerListPage(token, opts, from, to, 1);
   const total = first.total;
@@ -448,11 +399,6 @@ async function scanWatchedListings(
 
   rows.sort((a, b) => b.watchCount - a.watchCount);
   return { rows, scanned, total };
-}
-
-function csvCell(value: string | number | boolean): string {
-  const s = typeof value === "number" && Number.isNaN(value) ? "" : String(value);
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
 function writeCsv(path: string, rows: ItemDetail[], details: boolean, bestOffer: boolean): void {
@@ -493,19 +439,7 @@ async function main() {
       return;
     }
 
-    rows = listingIds.map((listingId) => ({
-      listingId,
-      title: "",
-      price: NaN,
-      currency: "",
-      quantityAvailable: NaN,
-      watchCount: NaN,
-      listingType: "",
-      site: "",
-      bestOfferEnabled: false,
-      sku: "",
-      viewUrl: `https://www.ebay.com/itm/${listingId}`,
-    }));
+    rows = listingIds.map(blankItem);
 
     if (opts.details) {
       console.error(`fetching details for ${listingIds.length} listing(s)...`);
@@ -544,7 +478,4 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+runMain(main);

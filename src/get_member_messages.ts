@@ -7,87 +7,51 @@
  *   npx tsx src/get_member_messages.ts --account <name> [COUNT]
  */
 
-import { findText, findErrors } from "./xml_util.ts";
+import { findBlocks, findText } from "./xml_util.ts";
 import { accountFromArgs, authnAuthToken } from "./ebay_auth.ts";
-
-function findAll(xml: string, tag: string): string[] {
-  const re = new RegExp(`<(?:\\w+:)?${tag}[^>]*>([\\s\\S]*?)</(?:\\w+:)?${tag}>`, "g");
-  const out: string[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(xml)) !== null) out.push(m[1]);
-  return out;
-}
+import { printErrors, tradingCall } from "./trading_api.ts";
+import { DAY_MS, runMain } from "./util.ts";
 
 async function main() {
   const { account, rest } = accountFromArgs(process.argv.slice(2));
   const count = parseInt(rest[0] ?? "3", 10);
 
-  const token = authnAuthToken(account);
-
   const now = new Date();
-  const start = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000); // last 30 days
+  const start = new Date(now.getTime() - 30 * DAY_MS); // last 30 days
 
-  const xmlBody = `<?xml version="1.0" encoding="utf-8"?>
-<GetMemberMessagesRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-  <MailMessageType>All</MailMessageType>
+  const r = await tradingCall(
+    authnAuthToken(account),
+    "GetMemberMessages",
+    `  <MailMessageType>All</MailMessageType>
   <StartCreationTime>${start.toISOString()}</StartCreationTime>
   <EndCreationTime>${now.toISOString()}</EndCreationTime>
   <DetailLevel>ReturnMessages</DetailLevel>
   <Pagination>
     <EntriesPerPage>${Math.max(count, 10)}</EntriesPerPage>
     <PageNumber>1</PageNumber>
-  </Pagination>
-</GetMemberMessagesRequest>`;
+  </Pagination>`
+  );
+  console.log(`Ack: ${r.ack}`);
+  printErrors(r.errors);
+  if (!r.ok) return;
 
-  const resp = await fetch("https://api.ebay.com/ws/api.dll", {
-    method: "POST",
-    headers: {
-      "Content-Type": "text/xml",
-      "X-EBAY-API-SITEID": "0",
-      "X-EBAY-API-COMPATIBILITY-LEVEL": "1193",
-      "X-EBAY-API-CALL-NAME": "GetMemberMessages",
-      "X-EBAY-API-IAF-TOKEN": token,
-    },
-    body: xmlBody,
-  });
-
-  if (!resp.ok) {
-    console.log(`HTTP ${resp.status}`);
+  const parsed = findBlocks(r.xml, "MemberMessageExchange").map((m) => ({
+    sender: findText(m, "SenderID") ?? "",
+    subject: findText(m, "Subject") ?? "",
+    text: findText(m, "Body") ?? "",
+    creationDate: findText(m, "CreationDate") ?? "",
+    itemId: findText(m, "ItemID") ?? "",
+  }));
+  parsed.sort((a, b) => (a.creationDate < b.creationDate ? 1 : -1));
+  for (const msg of parsed.slice(0, count)) {
+    console.log("----");
+    console.log(`From: ${msg.sender}`);
+    console.log(`Date: ${msg.creationDate}`);
+    console.log(`Item: ${msg.itemId}`);
+    console.log(`Subject: ${msg.subject}`);
+    console.log(`Text: ${msg.text}`);
   }
-  const body = await resp.text();
-
-  const ack = findText(body, "Ack") ?? "Unknown";
-  console.log(`Ack: ${ack}`);
-
-  for (const err of findErrors(body)) {
-    console.log(`  [${err.severity}] ${err.short} -- ${err.long}`);
-  }
-
-  if (ack === "Success" || ack === "Warning") {
-    const messages = findAll(body, "MemberMessageExchange");
-    const parsed = messages.map((m) => ({
-      sender: findText(m, "SenderID") ?? "",
-      subject: findText(m, "Subject") ?? "",
-      text: findText(m, "Body") ?? "",
-      creationDate: findText(m, "CreationDate") ?? "",
-      itemId: findText(m, "ItemID") ?? "",
-    }));
-    parsed.sort((a, b) => (a.creationDate < b.creationDate ? 1 : -1));
-    for (const msg of parsed.slice(0, count)) {
-      console.log("----");
-      console.log(`From: ${msg.sender}`);
-      console.log(`Date: ${msg.creationDate}`);
-      console.log(`Item: ${msg.itemId}`);
-      console.log(`Subject: ${msg.subject}`);
-      console.log(`Text: ${msg.text}`);
-    }
-    if (parsed.length === 0) {
-      console.log("(no messages found in the last 30 days)");
-    }
-  }
+  if (parsed.length === 0) console.log("(no messages found in the last 30 days)");
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+runMain(main);

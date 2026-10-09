@@ -24,11 +24,10 @@
  * with its own Auth'n'Auth token, via src/ebay_auth.ts).
  */
 
-import { findText, findErrors, findBlocks } from "./xml_util.ts";
-import { accountNames, authnAuthToken, useAccount } from "./ebay_auth.ts";
-
-const API = "https://api.ebay.com/ws/api.dll";
-const CHUNK_DAYS = 29;
+import { findBlocks, findText } from "./xml_util.ts";
+import { accountNames, authnAuthToken, die, useAccount } from "./ebay_auth.ts";
+import { fetchOrderBlocks, money, num } from "./trading_api.ts";
+import { normalizeTracking as normalize, runMain } from "./util.ts";
 
 interface Options {
   tracking: string;
@@ -60,23 +59,6 @@ interface OrderRecord {
   items: LineItem[];
 }
 
-/** Strip formatting so "1Z 999 AA1" and "1z999aa1" compare equal. */
-function normalize(s: string): string {
-  return s.replace(/[^0-9a-z]/gi, "").toUpperCase();
-}
-
-function num(s: string | undefined): number {
-  const n = parseFloat(s ?? "");
-  return Number.isFinite(n) ? n : 0;
-}
-
-function money(block: string, tag: string): { amount: number; currency: string } {
-  const re = new RegExp(`<(?:\\w+:)?${tag}[^>]*currencyID="([^"]*)"[^>]*>([\\s\\S]*?)</(?:\\w+:)?${tag}>`);
-  const m = block.match(re);
-  if (!m) return { amount: num(findText(block, tag)), currency: "" };
-  return { amount: num(m[2]), currency: m[1] };
-}
-
 function trackingNumbersIn(block: string): string[] {
   return findBlocks(block, "ShipmentTrackingDetails")
     .map((d) => findText(d, "ShipmentTrackingNumber"))
@@ -96,29 +78,20 @@ function parseArgs(argv: string[]): Options {
     else if (a === "--from") from = new Date(argv[++i]);
     else if (a === "--to") to = new Date(argv[++i]);
     else if (a === "--month") month = argv[++i];
-    else if (a.startsWith("--")) {
-      console.error(`ERROR: unknown flag ${a}`);
-      process.exit(1);
-    } else if (tracking === undefined) tracking = a;
-    else {
-      console.error(`ERROR: unexpected extra argument ${a}`);
-      process.exit(1);
-    }
+    else if (a.startsWith("--")) die(`ERROR: unknown flag ${a}`);
+    else if (tracking === undefined) tracking = a;
+    else die(`ERROR: unexpected extra argument ${a}`);
   }
 
   if (!tracking) {
-    console.error(
+    die(
       "Usage: npx tsx src/find_order_by_tracking.ts <tracking-number> [--account <name>] (--month YYYY-MM | --from <date> --to <date>)"
     );
-    process.exit(1);
   }
 
   if (month) {
     const m = /^(\d{4})-(\d{2})$/.exec(month);
-    if (!m) {
-      console.error("ERROR: --month expects YYYY-MM");
-      process.exit(1);
-    }
+    if (!m) die("ERROR: --month expects YYYY-MM");
     const year = Number(m[1]);
     const mon = Number(m[2]);
     from = new Date(Date.UTC(year, mon - 1, 1));
@@ -126,8 +99,7 @@ function parseArgs(argv: string[]): Options {
   }
 
   if (!from || !to || Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
-    console.error("ERROR: pass --month YYYY-MM, or both --from and --to");
-    process.exit(1);
+    die("ERROR: pass --month YYYY-MM, or both --from and --to");
   }
 
   return { tracking, account, from, to };
@@ -138,86 +110,29 @@ function accountsToSearch(explicit?: string): { name: string; token: string }[] 
   return names.map((name) => ({ name, token: authnAuthToken(name) }));
 }
 
-async function getOrdersPage(token: string, from: Date, to: Date, page: number): Promise<{ xml: string; more: boolean }> {
-  const xmlBody = `<?xml version="1.0" encoding="utf-8"?>
-<GetOrdersRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-  <CreateTimeFrom>${from.toISOString()}</CreateTimeFrom>
-  <CreateTimeTo>${to.toISOString()}</CreateTimeTo>
-  <OrderRole>Seller</OrderRole>
-  <OrderStatus>All</OrderStatus>
-  <DetailLevel>ReturnAll</DetailLevel>
-  <Pagination>
-    <EntriesPerPage>100</EntriesPerPage>
-    <PageNumber>${page}</PageNumber>
-  </Pagination>
-</GetOrdersRequest>`;
-
-  const resp = await fetch(API, {
-    method: "POST",
-    headers: {
-      "Content-Type": "text/xml",
-      "X-EBAY-API-SITEID": "0",
-      "X-EBAY-API-COMPATIBILITY-LEVEL": "1193",
-      "X-EBAY-API-CALL-NAME": "GetOrders",
-      "X-EBAY-API-IAF-TOKEN": token,
-    },
-    body: xmlBody,
-  });
-  const xml = await resp.text();
-  const ack = findText(xml, "Ack") ?? "Unknown";
-  if (ack !== "Success" && ack !== "Warning") {
-    for (const err of findErrors(xml)) console.error(`  [${err.severity}] ${err.short} -- ${err.long}`);
-    throw new Error(`GetOrders failed (HTTP ${resp.status}, Ack ${ack})`);
-  }
-  const hasMore = (findText(xml, "HasMoreOrders") ?? "false") === "true";
-  return { xml, more: hasMore };
-}
-
-function parseOrders(xml: string): OrderRecord[] {
-  return findBlocks(xml, "Order").map((o) => {
-    const total = money(o, "Total");
-    const items: LineItem[] = findBlocks(o, "Transaction").map((t) => ({
-      itemId: findText(t, "ItemID") ?? "",
-      transactionId: findText(t, "TransactionID") ?? "",
-      title: findText(t, "Title") ?? "",
-      sku: findText(t, "SKU") ?? "",
-      qty: num(findText(t, "QuantityPurchased")) || 1,
-      price: money(t, "TransactionPrice").amount,
-      currency: money(t, "TransactionPrice").currency,
-      trackingNumbers: trackingNumbersIn(t),
-    }));
-    return {
-      orderId: findText(o, "OrderID") ?? "",
-      created: findText(o, "CreatedTime") ?? "",
-      status: findText(o, "OrderStatus") ?? "",
-      cancelStatus: findText(o, "CancelStatus") ?? "",
-      buyer: findText(o, "BuyerUserID") ?? "",
-      total: total.amount,
-      currency: total.currency,
-      trackingNumbers: trackingNumbersIn(o),
-      items,
-    };
-  });
-}
-
-async function fetchOrders(token: string, from: Date, to: Date): Promise<OrderRecord[]> {
-  const all: OrderRecord[] = [];
-  const seen = new Set<string>();
-  for (let cursor = new Date(from); cursor < to; ) {
-    const chunkEnd = new Date(Math.min(cursor.getTime() + CHUNK_DAYS * 864e5, to.getTime()));
-    for (let page = 1; ; page++) {
-      const { xml, more } = await getOrdersPage(token, cursor, chunkEnd, page);
-      for (const o of parseOrders(xml)) {
-        if (!seen.has(o.orderId)) {
-          seen.add(o.orderId);
-          all.push(o);
-        }
-      }
-      if (!more) break;
-    }
-    cursor = chunkEnd;
-  }
-  return all;
+function parseOrder(o: string): OrderRecord {
+  const total = money(o, "Total");
+  const items: LineItem[] = findBlocks(o, "Transaction").map((t) => ({
+    itemId: findText(t, "ItemID") ?? "",
+    transactionId: findText(t, "TransactionID") ?? "",
+    title: findText(t, "Title") ?? "",
+    sku: findText(t, "SKU") ?? "",
+    qty: num(findText(t, "QuantityPurchased")) || 1,
+    price: money(t, "TransactionPrice").amount,
+    currency: money(t, "TransactionPrice").currency,
+    trackingNumbers: trackingNumbersIn(t),
+  }));
+  return {
+    orderId: findText(o, "OrderID") ?? "",
+    created: findText(o, "CreatedTime") ?? "",
+    status: findText(o, "OrderStatus") ?? "",
+    cancelStatus: findText(o, "CancelStatus") ?? "",
+    buyer: findText(o, "BuyerUserID") ?? "",
+    total: total.amount,
+    currency: total.currency,
+    trackingNumbers: trackingNumbersIn(o),
+  items,
+  };
 }
 
 function describe(account: string, o: OrderRecord, target: string): string {
@@ -252,7 +167,7 @@ async function main() {
     console.error(
       `Scanning ${name}: orders created ${opts.from.toISOString().slice(0, 10)} .. ${opts.to.toISOString().slice(0, 10)}...`
     );
-    const orders = await fetchOrders(token, opts.from, opts.to);
+    const orders = (await fetchOrderBlocks(token, opts.from, opts.to)).map(parseOrder);
     console.error(`  ${orders.length} orders fetched.`);
 
     const matches = orders.filter((o) => {
@@ -272,7 +187,4 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+runMain(main);

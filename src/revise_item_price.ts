@@ -7,58 +7,33 @@
  *   npx tsx src/revise_item_price.ts --account <name> <ITEM_ID> <NEW_PRICE>
  */
 
-import { findText, findErrors } from "./xml_util.ts";
-import { accountFromArgs, authnAuthToken } from "./ebay_auth.ts";
+import { findText } from "./xml_util.ts";
+import { accountFromArgs, authnAuthToken, die } from "./ebay_auth.ts";
+import { printErrors, tradingCall } from "./trading_api.ts";
+import { runMain } from "./util.ts";
 
 async function main() {
   const { account, rest } = accountFromArgs(process.argv.slice(2));
   const [itemId, newPrice] = rest;
   if (!itemId || !newPrice || rest.length !== 2) {
-    console.error("Usage: npx tsx src/revise_item_price.ts --account <name> <ITEM_ID> <NEW_PRICE>");
-    process.exit(1);
+    die("Usage: npx tsx src/revise_item_price.ts --account <name> <ITEM_ID> <NEW_PRICE>");
   }
 
-  const token = authnAuthToken(account);
-
-  const xmlBody = `<?xml version="1.0" encoding="utf-8"?>
-<ReviseItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-  <Item>
+  const r = await tradingCall(
+    authnAuthToken(account),
+    "ReviseItem",
+    `  <Item>
     <ItemID>${itemId}</ItemID>
     <StartPrice>${newPrice}</StartPrice>
-  </Item>
-</ReviseItemRequest>`;
+  </Item>`
+  );
+  console.log(`Ack: ${r.ack}`);
+  printErrors(r.errors);
 
-  const resp = await fetch("https://api.ebay.com/ws/api.dll", {
-    method: "POST",
-    headers: {
-      "Content-Type": "text/xml",
-      "X-EBAY-API-SITEID": "0",
-      "X-EBAY-API-COMPATIBILITY-LEVEL": "1193",
-      "X-EBAY-API-CALL-NAME": "ReviseItem",
-      "X-EBAY-API-IAF-TOKEN": token,
-    },
-    body: xmlBody,
-  });
-
-  if (!resp.ok) {
-    console.log(`HTTP ${resp.status}`);
-  }
-  const body = await resp.text();
-
-  const ack = findText(body, "Ack") ?? "Unknown";
-  console.log(`Ack: ${ack}`);
-
-  for (const err of findErrors(body)) {
-    console.log(`  [${err.severity}] ${err.short} -- ${err.long}`);
-  }
-
-  if (ack === "Success" || ack === "Warning") {
-    const fees = findText(body, "Fee") ?? "";
+  if (r.ok) {
+    const fees = findText(r.xml, "Fee") ?? "";
     console.log(`Item ${itemId} revised. StartPrice: ${newPrice}${fees ? ` (fee: ${fees})` : ""}`);
   }
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+runMain(main);

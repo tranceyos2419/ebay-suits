@@ -42,12 +42,11 @@
 import { chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { findErrors, findText } from "./xml_util.ts";
+import { tradingCall } from "./trading_api.ts";
 
 export const CREDS_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "credentials.json");
 
 const TOKEN_URL = "https://api.ebay.com/identity/v1/oauth2/token";
-const TRADING_API = "https://api.ebay.com/ws/api.dll";
 const SCOPE_BASE = "https://api.ebay.com/oauth/api_scope";
 const ACCESS_TOKEN_MARGIN_MS = 5 * 60 * 1000;
 const EXPIRY_WARNING_DAYS = 60;
@@ -308,22 +307,9 @@ async function mintOrReuse(name: string, needed: string[]): Promise<string> {
 /** The eBay user ID a token belongs to (Trading API GetUser). Works with an
  * Auth'n'Auth token or an OAuth user token. */
 export async function getUserId(token: string): Promise<string> {
-  const resp = await fetch(TRADING_API, {
-    method: "POST",
-    headers: {
-      "Content-Type": "text/xml",
-      "X-EBAY-API-SITEID": "0",
-      "X-EBAY-API-COMPATIBILITY-LEVEL": "1193",
-      "X-EBAY-API-CALL-NAME": "GetUser",
-      "X-EBAY-API-IAF-TOKEN": token,
-    },
-    body: `<?xml version="1.0" encoding="utf-8"?>
-<GetUserRequest xmlns="urn:ebay:apis:eBLBaseComponents"></GetUserRequest>`,
-  });
-  const xml = await resp.text();
-  const ack = findText(xml, "Ack") ?? `HTTP ${resp.status}`;
-  if (ack !== "Success" && ack !== "Warning") {
-    const why = findErrors(xml).map((e) => e.long || e.short).join("; ");
+  const { xml, ok, ack, errors } = await tradingCall(token, "GetUser", "");
+  if (!ok) {
+    const why = errors.map((e) => e.long || e.short).join("; ");
     throw new Error(`GetUser failed (${ack})${why ? `: ${why}` : ""}`);
   }
   // Exact tag match -- findText would also accept <UserIDChanged> etc.

@@ -105,8 +105,18 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { findText, findErrors, findBlocks } from "./xml_util.ts";
-import { accountFromArgs, authnAuthToken, die as authDie, oauthToken } from "./ebay_auth.ts";
+import { findBlocks, findText } from "./xml_util.ts";
+import { accountFromArgs, authnAuthToken, die, oauthToken } from "./ebay_auth.ts";
+import { csvCell, parseCsv } from "./csv.ts";
+import {
+  TRADING_API,
+  TRADING_API_SANDBOX,
+  printErrors,
+  tradingCall,
+  tradingRequestXml,
+  type TradingResponse,
+} from "./trading_api.ts";
+import { runMain, sleep } from "./util.ts";
 
 type Env = "prod" | "sandbox";
 
@@ -115,11 +125,9 @@ const ACCOUNT_API_HOST: Record<Env, string> = {
   sandbox: "https://api.sandbox.ebay.com",
 };
 const TRADING_API_HOST: Record<Env, string> = {
-  prod: "https://api.ebay.com/ws/api.dll",
-  sandbox: "https://api.sandbox.ebay.com/ws/api.dll",
+  prod: TRADING_API,
+  sandbox: TRADING_API_SANDBOX,
 };
-
-const TRADING_API_COMPATIBILITY_LEVEL = "1193";
 
 const ACCOUNT_API_SCOPE = "sell.account";
 
@@ -127,7 +135,7 @@ const ACCOUNT_API_SCOPE = "sell.account";
 let account = "";
 
 function sandboxToken(): string {
-  return process.env.EBAY_SANDBOX_TOKEN ?? authDie("ERROR: --sandbox needs a Sandbox user token in EBAY_SANDBOX_TOKEN.");
+  return process.env.EBAY_SANDBOX_TOKEN ?? die("ERROR: --sandbox needs a Sandbox user token in EBAY_SANDBOX_TOKEN.");
 }
 
 /** OAuth user token for the Account API (REST). */
@@ -267,84 +275,54 @@ async function listPolicies(env: Env, marketplaceId: string) {
   }
 }
 
-function buildReviseItemXml(itemId: string, policyId: string): string {
-  return `<?xml version="1.0" encoding="utf-8"?>
-<ReviseItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-  <Item>
+/** Inner XML of a (Verify)ReviseItem request moving an item to a shipping policy. */
+function reviseItemBody(itemId: string, policyId: string): string {
+  return `  <Item>
     <ItemID>${itemId}</ItemID>
     <SellerProfiles>
       <SellerShippingProfile>
         <ShippingProfileID>${policyId}</ShippingProfileID>
       </SellerShippingProfile>
     </SellerProfiles>
-  </Item>
-</ReviseItemRequest>`;
+  </Item>`;
 }
 
-/** POST an arbitrary Trading API call and return the raw XML response text. */
-async function callTradingApi(
+/** POST a Trading API call with this env's endpoint and token. */
+function callTradingApi(
   env: Env,
   callName: string,
-  xmlBody: string,
+  inner: string,
   siteId: number,
-  extraHeaders?: Record<string, string>
-): Promise<string> {
-  const url = TRADING_API_HOST[env];
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "text/xml",
-      "X-EBAY-API-SITEID": String(siteId),
-      "X-EBAY-API-COMPATIBILITY-LEVEL": TRADING_API_COMPATIBILITY_LEVEL,
-      "X-EBAY-API-CALL-NAME": callName,
-      "X-EBAY-API-IAF-TOKEN": tradingApiToken(env),
-      ...extraHeaders,
-    },
-    body: xmlBody,
-  });
-  return resp.text();
-}
-
-function printErrors(xml: string): boolean {
-  let ok = true;
-  for (const err of findErrors(xml)) {
-    console.log(`  [${err.severity}] ${err.short} -- ${err.long}`);
-    if (err.severity === "Error") {
-      ok = false;
-    }
-  }
-  return ok;
+  headers?: Record<string, string>
+): Promise<TradingResponse> {
+  return tradingCall(tradingApiToken(env), callName, inner, { siteId, url: TRADING_API_HOST[env], headers });
 }
 
 async function reviseItem(env: Env, itemId: string, policyId: string, siteId: number, dryRun: boolean): Promise<boolean> {
-  const xmlBody = buildReviseItemXml(itemId, policyId);
+  const body = reviseItemBody(itemId, policyId);
 
   if (dryRun) {
     console.log(`[DRY RUN] Would revise Item ${itemId} -> ShippingProfileID ${policyId}`);
-    console.log(xmlBody);
+    console.log(tradingRequestXml("ReviseItem", body));
     console.log();
     return true;
   }
 
-  const xml = await callTradingApi(env, "ReviseItem", xmlBody, siteId);
-  const ack = findText(xml, "Ack") ?? "Unknown";
-  console.log(`Item ${itemId}: Ack=${ack}`);
-  const noHardErrors = printErrors(xml);
-  return (ack === "Success" || ack === "Warning") && noHardErrors;
+  const r = await callTradingApi(env, "ReviseItem", body, siteId);
+  console.log(`Item ${itemId}: Ack=${r.ack}`);
+  const noHardErrors = printErrors(r.errors);
+  return r.ok && noHardErrors;
 }
+
+const getItemBody = (itemId: string) => `  <ItemID>${itemId}</ItemID>
+  <DetailLevel>ReturnAll</DetailLevel>`;
 
 /** Read-only: fetch an item's title and current shipping profile. Proves read access. */
 async function getItem(env: Env, itemId: string, siteId: number): Promise<string | null> {
-  const xmlBody = `<?xml version="1.0" encoding="utf-8"?>
-<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-  <ItemID>${itemId}</ItemID>
-  <DetailLevel>ReturnAll</DetailLevel>
-</GetItemRequest>`;
-  const xml = await callTradingApi(env, "GetItem", xmlBody, siteId);
-  const ack = findText(xml, "Ack") ?? "Unknown";
-  if (ack !== "Success" && ack !== "Warning") {
+  const { xml, ok, ack, errors } = await callTradingApi(env, "GetItem", getItemBody(itemId), siteId);
+  if (!ok) {
     console.log(`  READ  Item ${itemId}: Ack=${ack} (could not read this item)`);
-    printErrors(xml);
+    printErrors(errors);
     return null;
   }
   const title = findText(xml, "Title") ?? "(no title)";
@@ -356,12 +334,10 @@ async function getItem(env: Env, itemId: string, siteId: number): Promise<string
 
 /** Validate-only: ask eBay whether this revision WOULD succeed, without applying it. */
 async function verifyReviseItem(env: Env, itemId: string, policyId: string, siteId: number): Promise<boolean> {
-  const xmlBody = buildReviseItemXml(itemId, policyId);
-  const xml = await callTradingApi(env, "VerifyReviseItem", xmlBody, siteId);
-  const ack = findText(xml, "Ack") ?? "Unknown";
-  console.log(`  VERIFY Item ${itemId} -> ShippingProfileID ${policyId}: Ack=${ack} (no change was made)`);
-  const ok = printErrors(xml);
-  return (ack === "Success" || ack === "Warning") && ok;
+  const r = await callTradingApi(env, "VerifyReviseItem", reviseItemBody(itemId, policyId), siteId);
+  console.log(`  VERIFY Item ${itemId} -> ShippingProfileID ${policyId}: Ack=${r.ack} (no change was made)`);
+  const noHardErrors = printErrors(r.errors);
+  return r.ok && noHardErrors;
 }
 
 async function checkAccess(env: Env, itemIds: string[], policyId: string | undefined, siteId: number) {
@@ -489,7 +465,7 @@ const GET_MY_EBAY_SELLING_OUTPUT_SELECTOR = [
   "ActiveList.ItemArray.Item.SellerProfiles.SellerShippingProfile.ShippingProfileName",
 ].join(",");
 
-function buildGetMyeBaySellingXml(pageNumber: number, entriesPerPage: number): string {
+function getMyeBaySellingBody(pageNumber: number, entriesPerPage: number): string {
   // Explicit, stable sort is required: GetMyeBaySelling's default order relates
   // to TimeLeft, which keeps changing (GTC listings' countdowns), so items can
   // drift between pages -- and get silently skipped -- across a scan that
@@ -500,17 +476,14 @@ function buildGetMyeBaySellingXml(pageNumber: number, entriesPerPage: number): s
   // entries -- see the module-level NOTE above. scanActiveListings() below is
   // kept only as a fallback for smaller stores; migrate-by-price defaults to
   // --items-file instead.
-  return `<?xml version="1.0" encoding="utf-8"?>
-<GetMyeBaySellingRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-  <ActiveList>
+  return `  <ActiveList>
     <Include>true</Include>
     <Sort>ItemIDAscending</Sort>
     <Pagination>
       <EntriesPerPage>${entriesPerPage}</EntriesPerPage>
       <PageNumber>${pageNumber}</PageNumber>
     </Pagination>
-  </ActiveList>
-</GetMyeBaySellingRequest>`;
+  </ActiveList>`;
 }
 
 /** One page of active listings: total page count plus each item's price and
@@ -524,18 +497,17 @@ async function fetchActiveListingsPage(
   totalPages: number;
   items: Array<{ itemId: string; title: string; price: number; profileId: string; profileName: string }>;
 }> {
-  const xml = await callTradingApi(
+  const { xml, ok, ack, errors } = await callTradingApi(
     env,
     "GetMyeBaySelling",
-    buildGetMyeBaySellingXml(pageNumber, entriesPerPage),
+    getMyeBaySellingBody(pageNumber, entriesPerPage),
     siteId,
     { "X-EBAY-API-OUTPUT-SELECTOR": GET_MY_EBAY_SELLING_OUTPUT_SELECTOR }
   );
 
-  const ack = findText(xml, "Ack") ?? "Unknown";
-  if (ack !== "Success" && ack !== "Warning") {
+  if (!ok) {
     console.error(`GetMyeBaySelling page ${pageNumber}: Ack=${ack}`);
-    printErrors(xml);
+    printErrors(errors);
     process.exit(1);
   }
 
@@ -552,7 +524,6 @@ async function fetchActiveListingsPage(
 }
 
 const PAGE_DELAY_MS = 250;
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Scan every active listing once: collect the price-range policy catalog
  * (from clean "$min - $max" policy names seen anywhere) and every listing
@@ -706,10 +677,6 @@ function buildReport(sourceItems: SourceItem[], ranges: Map<string, PolicyRange>
   });
 }
 
-function csvEscape(value: string): string {
-  return /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
-}
-
 function writeReportCsv(path: string, rows: ReportRow[]) {
   const dir = dirname(path);
   if (dir && dir !== "." && !existsSync(dir)) {
@@ -719,12 +686,12 @@ function writeReportCsv(path: string, rows: ReportRow[]) {
   const lines = rows.map((r) =>
     [
       r.itemId,
-      csvEscape(r.title),
+      csvCell(r.title),
       r.currentPrice,
       r.sourcePolicyId,
-      csvEscape(r.sourcePolicyName),
+      csvCell(r.sourcePolicyName),
       r.targetPolicyId,
-      csvEscape(r.targetPolicyName),
+      csvCell(r.targetPolicyName),
       r.status,
     ].join(",")
   );
@@ -732,50 +699,17 @@ function writeReportCsv(path: string, rows: ReportRow[]) {
 }
 
 function readReportCsv(path: string): ReportRow[] {
-  const text = readFileSync(path, "utf8").trim();
-  const [, ...lines] = text.split("\n");
-  return lines
-    .filter((l) => l.length > 0)
-    .map((line) => {
-      // Simple CSV split good enough for our own escaped output (titles may
-      // contain commas but are always quoted by writeReportCsv above).
-      const fields: string[] = [];
-      let cur = "";
-      let inQuotes = false;
-      for (let i = 0; i < line.length; i++) {
-        const c = line[i];
-        if (inQuotes) {
-          if (c === '"' && line[i + 1] === '"') {
-            cur += '"';
-            i++;
-          } else if (c === '"') {
-            inQuotes = false;
-          } else {
-            cur += c;
-          }
-        } else if (c === '"') {
-          inQuotes = true;
-        } else if (c === ",") {
-          fields.push(cur);
-          cur = "";
-        } else {
-          cur += c;
-        }
-      }
-      fields.push(cur);
-      const [itemId, title, currentPrice, sourcePolicyId, sourcePolicyName, targetPolicyId, targetPolicyName, status] =
-        fields;
-      return {
-        itemId,
-        title,
-        currentPrice: parseFloat(currentPrice),
-        sourcePolicyId,
-        sourcePolicyName,
-        targetPolicyId,
-        targetPolicyName,
-        status: status as "MATCH" | "NO_MATCH",
-      };
-    });
+  const [, ...rows] = parseCsv(readFileSync(path, "utf8"));
+  return rows.map(([itemId, title, currentPrice, sourcePolicyId, sourcePolicyName, targetPolicyId, targetPolicyName, status]) => ({
+    itemId,
+    title,
+    currentPrice: parseFloat(currentPrice),
+    sourcePolicyId,
+    sourcePolicyName,
+    targetPolicyId,
+    targetPolicyName,
+    status: status as "MATCH" | "NO_MATCH",
+  }));
 }
 
 function printRangeCatalog(ranges: Map<string, PolicyRange>) {
@@ -797,14 +731,8 @@ async function fetchItemDetails(
   itemId: string,
   siteId: number
 ): Promise<{ title: string; profileId: string; profileName: string } | null> {
-  const xmlBody = `<?xml version="1.0" encoding="utf-8"?>
-<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-  <ItemID>${itemId}</ItemID>
-  <DetailLevel>ReturnAll</DetailLevel>
-</GetItemRequest>`;
-  const xml = await callTradingApi(env, "GetItem", xmlBody, siteId);
-  const ack = findText(xml, "Ack") ?? "Unknown";
-  if (ack !== "Success" && ack !== "Warning") {
+  const { xml, ok, ack, errors } = await callTradingApi(env, "GetItem", getItemBody(itemId), siteId);
+  if (!ok) {
     return null;
   }
   return {
@@ -936,11 +864,6 @@ interface ParsedArgs {
   nameContains?: string;
   fromRateTableId?: string;
   toRateTableId?: string;
-}
-
-function die(msg: string): never {
-  console.error(msg);
-  process.exit(1);
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -1098,7 +1021,4 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+runMain(main);

@@ -13,53 +13,24 @@
  */
 
 import { readFileSync } from "node:fs";
-import { requestToken } from "./ebay_auth.ts";
-
-const BROWSE = "https://api.ebay.com/buy/browse/v1/item";
-
-async function appToken(): Promise<string> {
-  const t = await requestToken({ grant_type: "client_credentials", scope: "https://api.ebay.com/oauth/api_scope" });
-  return t.access_token;
-}
-
-async function browse(path: string, token: string): Promise<{ status: number; body: any }> {
-  for (let attempt = 0; ; attempt++) {
-    const resp = await fetch(`${BROWSE}/${path}`, {
-      headers: { Authorization: `Bearer ${token}`, "X-EBAY-C-MARKETPLACE-ID": "EBAY_US" },
-    });
-    if (resp.status === 429 && attempt < 3) {
-      await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
-      continue;
-    }
-    return { status: resp.status, body: await resp.json().catch(() => ({})) };
-  }
-}
+import { die } from "./ebay_auth.ts";
+import { appToken, getLegacyItem } from "./browse_api.ts";
+import { runMain } from "./util.ts";
 
 async function getPrice(itemId: string, token: string): Promise<{ price?: string; currency?: string; note?: string }> {
-  const single = await browse(`get_item_by_legacy_id?legacy_item_id=${itemId}`, token);
-  if (single.status === 200) {
-    return { price: single.body.price?.value, currency: single.body.price?.currency };
-  }
-  // 11006: the listing has variations -- fetch the group and take the lowest price.
-  if (single.body.errors?.some((e: any) => e.errorId === 11006)) {
-    const group = await browse(`get_items_by_item_group?item_group_id=${itemId}`, token);
-    const items: any[] = group.body.items ?? [];
-    const prices = items.map((i) => Number(i.price?.value)).filter((n) => !Number.isNaN(n));
-    if (prices.length) {
-      return { price: Math.min(...prices).toFixed(2), currency: items[0].price?.currency, note: "variations: lowest" };
-    }
-  }
-  return { note: single.body.errors?.[0]?.message ?? `HTTP ${single.status}` };
+  const r = await getLegacyItem(itemId, token);
+  if (!r.item) return { note: r.error ?? `HTTP ${r.status}` };
+  const { value, currency } = r.item.price ?? {};
+  return r.variations
+    ? { price: Number(value).toFixed(2), currency, note: "variations: lowest" }
+    : { price: value, currency };
 }
 
 async function main() {
   let ids = process.argv.slice(2);
   if (!ids.length) ids = readFileSync(0, "utf8").split(/\s+/);
   ids = ids.map((s) => s.trim()).filter((s) => /^\d+$/.test(s));
-  if (!ids.length) {
-    console.error("Usage: npx tsx src/browse_item_price.ts <itemId> [itemId ...]");
-    process.exit(1);
-  }
+  if (!ids.length) die("Usage: npx tsx src/browse_item_price.ts <itemId> [itemId ...]");
   const token = await appToken();
   console.log(["itemId", "price", "currency", "note"].join("\t"));
   for (const id of ids) {
@@ -68,7 +39,4 @@ async function main() {
   }
 }
 
-main().catch((e) => {
-  console.error(e instanceof Error ? e.message : e);
-  process.exit(1);
-});
+runMain(main);
