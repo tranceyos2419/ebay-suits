@@ -5,13 +5,13 @@
  * Subfolders are scanned too; folders left empty are removed. The reports/
  * folder itself is never removed.
  *
- * Runs daily via the launchd agent installed with --install
+ * Runs monthly (1st, 09:00) via the launchd agent installed with --install
  * (~/Library/LaunchAgents/com.ebay-suits.cleanup-reports.plist, log at
  * ~/Library/Logs/ebay-suits-cleanup-reports.log).
  *
  * Usage:
  *   npx tsx src/cleanup_reports.ts [--months N] [--dry-run]
- *   npx tsx src/cleanup_reports.ts --install     # schedule daily at 09:00
+ *   npx tsx src/cleanup_reports.ts --install     # schedule the 1st of each month at 09:00
  *   npx tsx src/cleanup_reports.ts --uninstall
  */
 
@@ -78,7 +78,7 @@ function install(): void {
   </array>
   <key>WorkingDirectory</key><string>${PROJECT_DIR}</string>
   <key>StartCalendarInterval</key>
-  <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+  <dict><key>Day</key><integer>1</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
   <key>StandardOutPath</key><string>${LOG_PATH}</string>
   <key>StandardErrorPath</key><string>${LOG_PATH}</string>
 </dict>
@@ -87,7 +87,7 @@ function install(): void {
   try { execFileSync("launchctl", ["bootout", `gui/${process.getuid!()}/${LABEL}`], { stdio: "ignore" }); } catch {}
   writeFileSync(PLIST_PATH, plist);
   execFileSync("launchctl", ["bootstrap", `gui/${process.getuid!()}`, PLIST_PATH]);
-  console.log(`Installed ${PLIST_PATH} (daily at 09:00, log: ${LOG_PATH})`);
+  console.log(`Installed ${PLIST_PATH} (1st of each month at 09:00, log: ${LOG_PATH})`);
 }
 
 function uninstall(): void {
