@@ -10,7 +10,8 @@
     "login": "tsx src/ebay_login.ts",
     "weekly-revenue": "tsx src/weekly_revenue.ts",
     "find-eligible-offers": "tsx src/find_eligible_offer_items.ts",
-    "find-return-by-tracking": "tsx src/find_return_by_tracking.ts"
+    "find-return-by-tracking": "tsx src/find_return_by_tracking.ts",
+    "cleanup-reports": "tsx src/cleanup_reports.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
