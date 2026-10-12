@@ -5,7 +5,7 @@
  * the Browse API with an application token.
  *
  * Input (stdin or file arg), TSV with header: eBay Item Id, Brand, Identity, CCURL,
- *   (col 5 unused), Our Shipping fee
+ *   (col 5 unused), Our Shipping fee (optional; blank -> our listing's cheapest shipping option)
  * Output (stdout), JSON { output, excluded }:
  *   output rows: eBay Item Id, Brand, Identity, CCURL, Our Price, Our Shipping fee,
  *     Lowest Rank, Lowest page price, Diff btw Our Page and Lowest, Lowest Page Shipping fee,
@@ -78,8 +78,9 @@ async function main() {
   const excluded: string[][] = [];
   for (const r of rows) {
     const [id, brand, identity, ccurl] = r;
-    const ourShip = Number((r[5] ?? "").replace(/[$,]/g, ""));
     const ours = await ourPrice(id, token);
+    const shipCell = (r[5] ?? "").replace(/[$,]/g, "").trim();
+    const ourShip = shipCell ? Number(shipCell) : (ours?.shipping ?? NaN);
     if (ours === undefined || Number.isNaN(ourShip)) {
       output.push([id, brand, identity, ccurl, "", "", "ERROR: our price/shipping not found"]);
       continue;
@@ -101,7 +102,8 @@ async function main() {
         ship === undefined ? "" : usd(ship),
         ship === undefined ? "Shipping unknown" : "Shipping outside 20% of ours",
         itemUrl(i), identity, usd(ourShip),
-        ship === undefined ? "" : signed(ship - ourShip, true),
+        ship === undefined ? "" : signed(ship - ourShip, false),
+        usd(mine), usd(mine - Number(i.price.value)), `https://www.ebay.com/itm/${id}`,
       ]);
     }
     const sellers = new Set(kept.map((i) => i.seller?.username));
