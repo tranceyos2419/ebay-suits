@@ -31,8 +31,12 @@ Example I/O: https://docs.google.com/spreadsheets/d/1dYNiPwoyw-NZOpapKMlIQ4ygu3i
 - Excluded Pages: one row per cheaper page dropped by the shipping rule — page price/shipping, reason, Identity,
   our shipping, shipping diff, our price, price diff (ours - theirs), our page URL
 
+- Output Summary: formulas over Output and Excluded Pages. Its competitor table's "Total listings" column looks each seller up in Seller Listings
+- Seller Listings: each competitor's active eBay Motors listing count, filled by `src/pricing/seller_listing_counts.ts`
+
 ## Run
 
 ```bash
 npx tsx src/pricing/check_lowest.ts input.tsv > output.json
+npx tsx src/pricing/seller_listing_counts.ts japan_store spice-japan
 ```
