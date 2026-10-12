@@ -29,7 +29,8 @@ Example I/O: https://docs.google.com/spreadsheets/d/1dYNiPwoyw-NZOpapKMlIQ4ygu3i
 - Input: eBay Item Id, Brand, Identity, CCURL (Our Shipping fee optional; taken from our listing when missing)
 - Output: one row per our item — our price/shipping, Lowest Rank, lowest page price/diff/shipping/seller/URL, lower page URLs, exclusion page URLs
 - Excluded Pages: one row per cheaper page dropped by the shipping rule — page price/shipping, reason, Identity,
-  our shipping, shipping diff, our price, price diff (ours - theirs), our page URL
+  our shipping, shipping diff, our price, price diff (ours - theirs), our page URL,
+  price diff - shipping diff (our total minus theirs; positive means their page is cheaper in total)
 - Output Summary: formulas over Output and Excluded Pages. Its competitor table's "Total listings" column looks each seller up in Seller Listings
 - Seller Listings: each competitor's active eBay Motors listing count, filled by `src/pricing/seller_listing_counts.ts`
 

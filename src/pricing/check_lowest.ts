@@ -12,7 +12,9 @@
  *     Shipping diff, Lowest Seller (username), Lowest item id, Lowest page URL,
  *     Lower Page URLs, Exclusion Page URLs
  *   excluded rows (one per excluded page): our item, page item id, seller, page price,
- *     page shipping, reason, page URL, Identity, our shipping, shipping diff
+ *     page shipping, reason, page URL, Identity, our shipping, shipping diff (theirs - ours),
+ *     our price, price diff (ours - theirs), our page URL, price diff - shipping diff
+ *     (= our price + shipping minus theirs; positive means their page costs the buyer less in total)
  *
  * A page's shipping fee is its cheapest shipping option (Browse API, default US destination).
  * Only competitor pages whose shipping fee is at most 20% above ours are compared
@@ -104,6 +106,7 @@ async function main() {
         itemUrl(i), identity, usd(ourShip),
         ship === undefined ? "" : signed(ship - ourShip, false),
         usd(mine), usd(mine - Number(i.price.value)), `https://www.ebay.com/itm/${id}`,
+        ship === undefined ? "" : signed(mine - Number(i.price.value) - (ship - ourShip), false),
       ]);
     }
     const sellers = new Set(kept.map((i) => i.seller?.username));
