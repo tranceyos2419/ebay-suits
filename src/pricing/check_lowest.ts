@@ -15,8 +15,8 @@
  *     page shipping, reason, page URL, Identity, our shipping, shipping diff
  *
  * A page's shipping fee is its cheapest shipping option (Browse API, default US destination).
- * Only competitor pages whose shipping fee is within +/-20% of ours are compared
- * (ours $100 -> $80..$120; free shipping -> free only). Pages priced below us that fail
+ * Only competitor pages whose shipping fee is at most 20% above ours are compared
+ * (ours $100 -> up to $120, cheaper or free shipping included). Pages priced below us that fail
  * the shipping test, or whose shipping fee is unknown, are listed in Exclusion Page URLs.
  *
  * Lowest Rank = 1 + number of distinct other Japanese sellers priced strictly
@@ -38,9 +38,9 @@ async function ourPrice(itemId: string, token: string): Promise<{ price: number;
   return item ? { price: Number(item.price?.value), shipping: shippingFee(item) } : undefined;
 }
 
-/** Their shipping fee is known and within +/-SHIPPING_TOLERANCE of ours. */
+/** Their shipping fee is known and at most SHIPPING_TOLERANCE above ours. */
 function shippingWithinTolerance(ours: number, theirs: number | undefined): boolean {
-  return theirs !== undefined && Math.abs(theirs - ours) <= ours * SHIPPING_TOLERANCE + 1e-9;
+  return theirs !== undefined && theirs <= ours * (1 + SHIPPING_TOLERANCE) + 1e-9;
 }
 
 // Same search as the CCURL: category, keyword, min price, Buy It Now, New.
@@ -100,7 +100,7 @@ async function main() {
       excluded.push([
         id, i.legacyItemId, i.seller?.username ?? "", usd(Number(i.price.value)),
         ship === undefined ? "" : usd(ship),
-        ship === undefined ? "Shipping unknown" : "Shipping outside 20% of ours",
+        ship === undefined ? "Shipping unknown" : "Shipping over 20% above ours",
         itemUrl(i), identity, usd(ourShip),
         ship === undefined ? "" : signed(ship - ourShip, false),
         usd(mine), usd(mine - Number(i.price.value)), `https://www.ebay.com/itm/${id}`,

@@ -17,7 +17,7 @@ Example I/O: https://docs.google.com/spreadsheets/d/1dYNiPwoyw-NZOpapKMlIQ4ygu3i
 - Checking who is taking the lowest
 - Include only pages whose shipping fees are within +20% of our pages
   - If we charge $100 for shipping fees, it only includes pages whose shipping fees are up to $120
-  - The script currently applies ±20% ($80..$120), matching the example sheet; pages outside it go to Excluded Pages
+  - Only the upper limit applies: cheaper or free shipping is included. Pages above the limit (or with unknown shipping) go to Excluded Pages
 
 ## Caution
 
@@ -30,7 +30,6 @@ Example I/O: https://docs.google.com/spreadsheets/d/1dYNiPwoyw-NZOpapKMlIQ4ygu3i
 - Output: one row per our item — our price/shipping, Lowest Rank, lowest page price/diff/shipping/seller/URL, lower page URLs, exclusion page URLs
 - Excluded Pages: one row per cheaper page dropped by the shipping rule — page price/shipping, reason, Identity,
   our shipping, shipping diff, our price, price diff (ours - theirs), our page URL
-
 - Output Summary: formulas over Output and Excluded Pages. Its competitor table's "Total listings" column looks each seller up in Seller Listings
 - Seller Listings: each competitor's active eBay Motors listing count, filled by `src/pricing/seller_listing_counts.ts`
 
