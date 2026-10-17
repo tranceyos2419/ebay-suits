@@ -27,6 +27,7 @@ Keep files organized by category by default:
   - `src/sales/` — orders, revenue and payouts
   - `src/returns/` — returns and refunds
   - `src/messages/` — buyer messages
+  - `src/shipping/` — Ship&Co orders and shipping labels
   - `src/maintenance/` — housekeeping for this project (e.g. report cleanup)
 - When creating a `.ts` file, put it in the matching category folder. If no folder fits, create a new, clearly named category folder under `src/` and put the file there.
 - Project configuration (`package.json`, `package-lock.json`, `tsconfig.json`, `.gitignore`, `AGENTS.md`, `CLAUDE.md`) stays at the project root.

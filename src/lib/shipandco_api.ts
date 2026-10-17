@@ -34,5 +34,10 @@ export async function shipandcoRequest(method: string, path: string, body?: unkn
   });
   const text = await resp.text();
   if (!resp.ok) throw new Error(`HTTP ${resp.status} from ${method} ${url}\n${text.slice(0, 1000)}`);
-  return text ? JSON.parse(text) : null;
+  // Some calls (e.g. DELETE) answer with plain text like "Order X deleted."
+  try {
+    return text ? JSON.parse(text) : null;
+  } catch {
+    return text;
+  }
 }
