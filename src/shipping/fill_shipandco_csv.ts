@@ -24,6 +24,7 @@
  *   --ddp            tick DDP (送料・関税 荷送人負担)
  *   --price-from-shipping  item prices (合計金額) become 送料, and 送料 becomes 0
  *   --gift           set 内容品種別 to 贈答品 (content_type GIFT)
+ *   --price-cap      to US/PR/VI: unit price > $95 (line <= $750) becomes a random $55-95
  *
  * Usage:
  *   npx tsx src/shipping/fill_shipandco_csv.ts --account jdm-direct-motors orders.csv [--limit 1]
@@ -70,7 +71,7 @@ function parseArgs(argv: string[]): Options {
     else if (!input) input = a;
     else die(`ERROR: unexpected extra argument ${a}`);
   }
-  if (!input) die("Usage: fill_shipandco_csv.ts --account <name> <orders.csv> [--create] [--out <file>] [--limit <n>] [--names <file.json>] [--ddp] [--price-from-shipping] [--gift]");
+  if (!input) die("Usage: fill_shipandco_csv.ts --account <name> <orders.csv> [--create] [--out <file>] [--limit <n>] [--names <file.json>] [--ddp] [--price-from-shipping] [--gift] [--price-cap]");
   return { account, input, output: output ?? input.replace(/(\.csv)?$/i, "-filled.csv"), create, limit, adjust, reviewedNames: loadReviewedNames(names) };
 }
 

@@ -17,6 +17,7 @@
  *   --ddp            tick DDP (送料・関税 荷送人負担)
  *   --price-from-shipping  item prices (合計金額) become 送料, and 送料 becomes 0
  *   --gift           set 内容品種別 to 贈答品 (content_type GIFT)
+ *   --price-cap      to US/PR/VI: unit price > $95 (line <= $750) becomes a random $55-95
  *
  * Usage:
  *   npx tsx src/shipping/create_shipandco_order.ts --account jdm-direct-motors 26-15152-00011 [more ids...]
@@ -35,7 +36,7 @@ async function main() {
   const namesAt = rest.indexOf("--names");
   const reviewedNames = loadReviewedNames(namesAt >= 0 ? rest[namesAt + 1] : undefined);
   const orderIds = rest.filter((a, i) => a !== "--create" && (namesAt < 0 || (i !== namesAt && i !== namesAt + 1)));
-  if (!orderIds.length) die("Usage: create_shipandco_order.ts --account <name> <ebay-order-id>... [--create] [--names <file.json>] [--ddp] [--price-from-shipping] [--gift]");
+  if (!orderIds.length) die("Usage: create_shipandco_order.ts --account <name> <ebay-order-id>... [--create] [--names <file.json>] [--ddp] [--price-from-shipping] [--gift] [--price-cap]");
   const token = authnAuthToken(account);
   const existing = await listApiOrders();
 

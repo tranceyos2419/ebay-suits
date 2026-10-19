@@ -45,11 +45,11 @@ export interface UploadOptions {
   reviewedNames?: Record<string, string>;
 }
 
-/** --ddp, --price-from-shipping and --gift from a script's arguments, and the arguments left over. */
+/** --ddp, --price-from-shipping, --gift and --price-cap from a script's arguments, and the arguments left over. */
 export function adjustmentsFromArgs(argv: string[]): { adjust: OrderAdjustments; rest: string[] } {
-  const flags = new Set(["--ddp", "--price-from-shipping", "--gift"]);
+  const flags = new Set(["--ddp", "--price-from-shipping", "--gift", "--price-cap"]);
   return {
-    adjust: { ddp: argv.includes("--ddp"), priceFromShipping: argv.includes("--price-from-shipping"), gift: argv.includes("--gift") },
+    adjust: { ddp: argv.includes("--ddp"), priceFromShipping: argv.includes("--price-from-shipping"), gift: argv.includes("--gift"), priceCap: argv.includes("--price-cap") },
     rest: argv.filter((a) => !flags.has(a)),
   };
 }

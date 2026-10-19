@@ -103,6 +103,20 @@ export interface OrderAdjustments {
   priceFromShipping?: boolean;
   /** Set 内容品種別 to 贈答品: customs.content_type = "GIFT". */
   gift?: boolean;
+  /** US/PR/VI price cap: see capPrices. */
+  priceCap?: boolean;
+}
+
+/**
+ * Price cap rule (same as /shipandco-filling-up): to the US (incl. PR/VI), an item whose
+ * unit price is over $95 and whose line total is at most $750 gets a random whole $55-95 unit price.
+ */
+export function capPrices(body: ShipandcoOrderBody): ShipandcoOrderBody {
+  if (!/^(US|PR|VI)$/i.test(body.to_address.country ?? "")) return body;
+  const products = body.products.map((p) =>
+    p.price > 95 && p.price * p.quantity <= 750 ? { ...p, price: 55 + Math.floor(Math.random() * 41) } : p
+  );
+  return { ...body, products };
 }
 
 /**
@@ -127,6 +141,7 @@ export function priceItemsAtShipping(body: ShipandcoOrderBody): ShipandcoOrderBo
 export function applyAdjustments(body: ShipandcoOrderBody, adj: OrderAdjustments = {}): ShipandcoOrderBody {
   let out = body;
   if (adj.priceFromShipping) out = priceItemsAtShipping(out);
+  if (adj.priceCap) out = capPrices(out);
   if (adj.ddp) out = { ...out, customs: { ...out.customs, duty_paid: true } };
   if (adj.gift) out = { ...out, customs: { ...out.customs, content_type: "GIFT" } };
   return out;
