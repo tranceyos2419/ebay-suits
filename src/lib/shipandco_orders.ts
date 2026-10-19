@@ -35,6 +35,16 @@ export interface ShipandcoOrder extends ShipandcoOrderBody {
 }
 
 /**
+ * Ship&Co offers Zonos (DDP) for Puerto Rico only as country "US" with province "PR".
+ * eBay sometimes gives a Puerto Rico address (state PR, ZIP 006xx/007xx/009xx) the
+ * country "PR" or even "VI" (U.S. Virgin Islands), and then no Zonos rate is shown.
+ */
+export function shipandcoCountry(country: string, state: string, zip: string): string {
+  const puertoRico = state.trim().toUpperCase() === "PR" || /^00(6|7|9)\d\d/.test(zip.trim());
+  return (country === "PR" || country === "VI") && puertoRico ? "US" : country;
+}
+
+/**
  * The POST /v1/orders body for an eBay order (carrier and parcels are left for Ship&Co;
  * 貨物内容 rules are applied separately, see shipandco_cargo_rules.ts).
  * 法人名 (company) is never set: a company name goes into 個人名 only when there is no person's name.
@@ -47,9 +57,9 @@ export function orderBodyFromEbay(o: EbayOrder): ShipandcoOrderBody {
     address1: a.street1,
     address2: a.street2,
     city: a.city,
-    province: a.state,
+    province: a.country === "PR" && !a.state ? "PR" : a.state,
     zip: a.zip,
-    country: a.country,
+    country: shipandcoCountry(a.country, a.state, a.zip),
     phone: a.phone,
   };
   if (a.email) toAddress.email = a.email;
