@@ -34,14 +34,39 @@ export interface ShipandcoOrder extends ShipandcoOrderBody {
   state: string;
 }
 
+/** US territories by their two-letter code, with the ZIP prefixes and state spellings eBay uses for them. */
+const US_TERRITORIES: { code: string; zip: RegExp; names: string[] }[] = [
+  { code: "PR", zip: /^00(6|7|9)\d\d/, names: ["PR", "P.R.", "PUERTO RICO"] },
+  { code: "VI", zip: /^008\d\d/, names: ["VI", "V.I.", "USVI", "VIRGIN ISLANDS", "US VIRGIN ISLANDS", "U.S. VIRGIN ISLANDS"] },
+  { code: "GU", zip: /^969(1|2|3)\d/, names: ["GU", "GUAM"] },
+  { code: "MP", zip: /^9695\d/, names: ["MP", "NORTHERN MARIANA ISLANDS", "CNMI"] },
+  { code: "AS", zip: /^96799/, names: ["AS", "AMERICAN SAMOA"] },
+];
+
+/** The US territory an address is in (by its country, state or ZIP), or undefined. */
+export function usTerritory(country: string, state: string, zip: string): string | undefined {
+  const st = state.trim().toUpperCase();
+  const t =
+    US_TERRITORIES.find((t) => t.names.includes(st)) ??
+    US_TERRITORIES.find((t) => t.code === country) ??
+    US_TERRITORIES.find((t) => t.zip.test(zip.trim()));
+  // Only addresses eBay gave as the US or as a territory; a foreign country with a similar ZIP is left alone.
+  return t && (country === "US" || US_TERRITORIES.some((x) => x.code === country)) ? t.code : undefined;
+}
+
 /**
- * Ship&Co offers Zonos (DDP) for Puerto Rico only as country "US" with province "PR".
- * eBay sometimes gives a Puerto Rico address (state PR, ZIP 006xx/007xx/009xx) the
- * country "PR" or even "VI" (U.S. Virgin Islands), and then no Zonos rate is shown.
+ * Ship&Co offers Zonos (DDP) for US territories only as country "US" with the territory
+ * code as province (e.g. US/PR, US/VI); as country "PR" or "VI" no Zonos rate is shown.
+ * eBay gives such addresses the country "PR"/"VI" (sometimes even "VI" for a Puerto Rico
+ * address) and states like "P.R." or "puerto rico".
  */
 export function shipandcoCountry(country: string, state: string, zip: string): string {
-  const puertoRico = state.trim().toUpperCase() === "PR" || /^00(6|7|9)\d\d/.test(zip.trim());
-  return (country === "PR" || country === "VI") && puertoRico ? "US" : country;
+  return usTerritory(country, state, zip) ? "US" : country;
+}
+
+/** The province to send: the territory code for a US territory address, else the state as given. */
+export function shipandcoProvince(country: string, state: string, zip: string): string {
+  return usTerritory(country, state, zip) ?? state;
 }
 
 /**
@@ -57,7 +82,7 @@ export function orderBodyFromEbay(o: EbayOrder): ShipandcoOrderBody {
     address1: a.street1,
     address2: a.street2,
     city: a.city,
-    province: a.country === "PR" && !a.state ? "PR" : a.state,
+    province: shipandcoProvince(a.country, a.state, a.zip),
     zip: a.zip,
     country: shipandcoCountry(a.country, a.state, a.zip),
     phone: a.phone,
