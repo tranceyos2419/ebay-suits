@@ -29,6 +29,7 @@ Keep files organized by category by default:
   - `src/messages/` — buyer messages
   - `src/shipping/` — Ship&Co orders and shipping labels
   - `src/maintenance/` — housekeeping for this project (e.g. report cleanup)
+  - `src/legacy/` — the previous Trading API and Post-Order API versions of scripts, mirroring the folders above. They are kept for reference and must not be used for new work.
 - When creating a `.ts` file, put it in the matching category folder. If no folder fits, create a new, clearly named category folder under `src/` and put the file there.
 - Project configuration (`package.json`, `package-lock.json`, `tsconfig.json`, `.gitignore`, `AGENTS.md`, `CLAUDE.md`) stays at the project root.
 - All secrets (eBay app keys and tokens, the Ship&Co token, and any other credential) must be stored only in `.env` at the project root, with permissions set to `600` and ignored by Git. Never store a secret anywhere else: not in another file, in `src/`, in a commit, in a shell profile, or in an exported shell variable. `.env.example` lists the key names with empty values.
@@ -44,3 +45,12 @@ Once the account is known, pass it to every script with `--account <name>` (`jdm
 ## Interacting with eBay
 
 Default to using the eBay API for any interaction with eBay. Use another method, such as browser automation, only if the user specifies otherwise.
+
+### Use eBay's Modernized APIs
+
+All new work, including new scripts, new features, and any change to an existing script, must use eBay's Modernized APIs and never the Traditional ones:
+- GraphQL at `https://graphqlapi.ebay.com/graphql` (`src/lib/graphql_api.ts`): the Listing API for reading and updating our listings, and the Return API for returns.
+- Modern REST APIs: Fulfillment (orders), Message (buyer messages), Browse (other sellers' listings), Account, Negotiation, Finances, and Identity.
+- Do not use the Trading API (XML), the Post-Order API, or Auth'n'Auth tokens in new code. The old Trading and Post-Order versions live in `src/legacy/` for reference only. Do not add to them or import them from outside `src/legacy/`.
+- If something has no Modernized API equivalent yet, stop and tell the user before falling back to a Traditional API.
+- eBay's GraphQL introspection is disabled. Look up exact types with eBay's schema search (`https://api.ebay.com/developer/mcp/v1/gqlmcp/search`) or the docs at `https://developer.ebay.com/develop/api/sell/<api>.md`.
