@@ -32,7 +32,7 @@ Keep files organized by category by default:
   - `src/legacy/` — the previous Trading API and Post-Order API versions of scripts, mirroring the folders above. They are kept for reference and must not be used for new work.
 - When creating a `.ts` file, put it in the matching category folder. If no folder fits, create a new, clearly named category folder under `src/` and put the file there.
 - Project configuration (`package.json`, `package-lock.json`, `tsconfig.json`, `.gitignore`, `AGENTS.md`, `CLAUDE.md`) stays at the project root.
-- All secrets (eBay app keys and tokens, the Ship&Co token, and any other credential) must be stored only in `.env` at the project root, with permissions set to `600` and ignored by Git. Never store a secret anywhere else: not in another file, in `src/`, in a commit, in a shell profile, or in an exported shell variable. `.env.example` lists the key names with empty values.
+- Local secrets (for example, `credentials.json`) stay at the project root, must have permissions set to `600`, and must be ignored by Git. Never move them into `src/` or commit them.
 
 When adding new files, place them in the category folder they belong to rather than the project root.
 

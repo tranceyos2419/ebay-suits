@@ -5,8 +5,9 @@
  *
  * Reads every key page (col A, price col C) and its TrackingPage 01-20 item IDs
  * (cols Q..AJ) from the "Downloaded Data" sheet, looks up each tracking page's
- * current price with Trading API GetItem, and appends one row per tracking page
- * to "Tracking Page Price" (existing rows, e.g. the example row, are kept).
+ * current price with the Buy Browse API (app token, so any seller's listing),
+ * and appends one row per tracking page to "Tracking Page Price" (existing
+ * rows, e.g. the example row, are kept).
  * Deactivate = "Yes" when tracking price - key price < THRESHOLD.
  * The workbook is edited in place (XML level); a backup is written next to it.
  *
@@ -18,10 +19,9 @@ import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { findText } from "../lib/xml_util.ts";
-import { accountFromArgs, authnAuthToken, die } from "../auth/ebay_auth.ts";
-import { tradingCall } from "../lib/trading_api.ts";
-import { mapLimit, runMain, sleep } from "../lib/util.ts";
+import { accountFromArgs, die } from "../auth/ebay_auth.ts";
+import { appToken, getLegacyItem } from "../lib/browse_api.ts";
+import { mapLimit, runMain } from "../lib/util.ts";
 
 const TRACK_COLS = ["Q","R","S","T","U","V","W","X","Y","Z","AA","AB","AC","AD","AE","AF","AG","AH","AI","AJ"];
 
@@ -40,31 +40,27 @@ function parseRows(xml: string, shared: string[]) {
   return rows;
 }
 
+/**
+ * Current price of a tracking page (any seller). Browse only returns live
+ * listings, so an ended one comes back as a lookup failure; a multi-variation
+ * listing gives its lowest variation price. browse() retries 429s/5xx itself.
+ */
 async function getPrice(itemId: string, token: string): Promise<{ price?: number; note?: string }> {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const r = await tradingCall(token, "GetItem", `<ItemID>${itemId}</ItemID><DetailLevel>ReturnAll</DetailLevel>`);
-    if (r.ok) {
-      const status = findText(r.xml, "ListingStatus");
-      const prices = [...r.xml.matchAll(/<(?:CurrentPrice|StartPrice)[^>]*>([\d.]+)</g)].map((m) => Number(m[1]));
-      if (!prices.length) return { note: "no price in response" };
-      return { price: Math.min(...prices), note: status && status !== "Active" ? `Listing ${status}` : undefined };
-    }
-    if (r.errors.some((e) => /rate|limit|exceeded|temporar/i.test(e.long + e.short))) {
-      await sleep(2000 * (attempt + 1));
-      continue;
-    }
-    return { note: r.errors[0]?.short ?? `HTTP ${r.status}` };
-  }
-  return { note: "API retries exhausted" };
+  const r = await getLegacyItem(itemId, token);
+  if (!r.item) return { note: r.error ?? `HTTP ${r.status}` };
+  const price = Number(r.item.price?.value);
+  if (Number.isNaN(price)) return { note: "no price in response" };
+  return { price };
 }
 
 async function main() {
-  const { account, rest } = accountFromArgs(process.argv.slice(2));
+  // --account is still required for consistency, though Browse uses an app token.
+  const { rest } = accountFromArgs(process.argv.slice(2));
   const ti = rest.indexOf("--threshold");
   const threshold = ti >= 0 ? Number(rest[ti + 1]) : 9;
   const file = resolve(rest.filter((a, i) => !a.startsWith("--") && (ti < 0 || i !== ti + 1))[0] ?? "");
   if (!existsSync(file)) die("Usage: npx tsx src/pricing/fill_tracking_page_price.ts --account <name> <file.xlsx> [--threshold 9] [--drop-example]");
-  const token = authnAuthToken(account);
+  const token = await appToken();
 
   const dir = mkdtempSync(join(tmpdir(), "xlsx-"));
   execFileSync("unzip", ["-q", "-o", file, "-d", dir]);

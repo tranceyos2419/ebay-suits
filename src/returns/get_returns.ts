@@ -1,104 +1,85 @@
 #!/usr/bin/env -S npx tsx
 /**
  * get_returns.ts -- list return requests for a seller account via eBay's
- * Post-Order API (Return Management).
+ * GraphQL Return API (src/lib/return_api.ts). Item titles come from the
+ * Fulfillment API's order record.
  *
  * Usage:
- *   npx tsx src/returns/get_returns.ts --account <name> [--days N] [--state OPEN|CLOSED|ALL] [--json]
+ *   npx tsx src/returns/get_returns.ts --account <name> [--days N] [--state OPEN|CLOSED|ALL|<preset>] [--json]
  *
- * Uses the account's Auth'n'Auth token -- the Post-Order API accepts it via
- * the `Authorization: TOKEN <token>` header.
+ * --state OPEN = every preset but CLOSED; a preset name (e.g.
+ * AWAITING_ACTION_FROM_SELLER) narrows to just that one.
  */
 
-import { accountFromArgs, authnAuthToken, die } from "../auth/ebay_auth.ts";
-import { postOrderGet } from "../lib/post_order_api.ts";
-import { DAY_MS, runMain } from "../lib/util.ts";
+import { accountFromArgs, die } from "../auth/ebay_auth.ts";
+import { fulfillmentToken, getOrder } from "../lib/fulfillment_api.ts";
+import {
+  fillMissingOrders,
+  OPEN_PRESETS,
+  RETURN_PRESETS,
+  type ReturnPreset,
+  returnToken,
+  searchReturns,
+} from "../lib/return_api.ts";
+import { DAY_MS, mapLimit, runMain } from "../lib/util.ts";
 
 interface Args {
   days: number;
   state: string;
   json: boolean;
-  limit: number;
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { days: 90, state: "ALL", json: false, limit: 100 };
+  const args: Args = { days: 90, state: "ALL", json: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--days") args.days = parseInt(argv[++i], 10);
     else if (a === "--state") args.state = argv[++i].toUpperCase();
-    else if (a === "--limit") args.limit = parseInt(argv[++i], 10);
+    else if (a === "--limit") i++; // accepted for compatibility; paging is automatic
     else if (a === "--json") args.json = true;
     else die(`Unknown argument: ${a}`);
   }
   return args;
 }
 
-function pick(obj: any, ...paths: string[]): any {
-  for (const path of paths) {
-    let cur = obj;
-    for (const key of path.split(".")) {
-      if (cur == null) break;
-      cur = cur[key];
-    }
-    if (cur != null && cur !== "") return cur;
-  }
-  return undefined;
-}
-
-function money(m: any): string {
-  if (!m) return "";
-  const value = pick(m, "value", "amount.value");
-  const cur = pick(m, "currency", "amount.currency") ?? "";
-  return value != null ? `${value} ${cur}`.trim() : "";
+function presetsFor(state: string): readonly ReturnPreset[] {
+  if (state === "ALL") return RETURN_PRESETS;
+  if (state === "OPEN") return OPEN_PRESETS;
+  if ((RETURN_PRESETS as readonly string[]).includes(state)) return [state as ReturnPreset];
+  die(`--state must be OPEN, CLOSED, ALL or one of ${RETURN_PRESETS.join(", ")}`);
 }
 
 async function main() {
   const { account, rest } = accountFromArgs(process.argv.slice(2));
   const args = parseArgs(rest);
-  const token = authnAuthToken(account);
+  const token = await returnToken(account);
 
   const from = new Date(Date.now() - args.days * DAY_MS);
+  const returns = await searchReturns(token, { from, presets: presetsFor(args.state) });
 
-  async function fetchPage(page: number): Promise<any> {
-    const params = new URLSearchParams({
-      role: "SELLER",
-      limit: String(args.limit),
-      offset: String(page),
-      creation_date_range_from: from.toISOString(),
-    });
-    if (args.state && args.state !== "ALL") params.set("return_state", args.state);
+  // Titles live on the order (the Return API's line items have none).
+  const fToken = await fulfillmentToken(account);
+  await fillMissingOrders(fToken, returns);
+  const titles = new Map<string, string>();
+  await mapLimit([...new Set(returns.map((r) => r.orderId).filter(Boolean))], 5, async (orderId) => {
+    const order = await getOrder(fToken, orderId);
+    for (const li of order?.lineItems ?? []) {
+      titles.set(`${orderId}/${li.lineItemId}`, li.title ?? "");
+      titles.set(`${orderId}/item:${li.legacyItemId}`, li.title ?? "");
+    }
+  });
+  const titleOf = (orderId: string, lineId: string, itemId: string) =>
+    titles.get(`${orderId}/${lineId}`) ?? titles.get(`${orderId}/item:${itemId}`) ?? "";
 
-    return postOrderGet(`/return/search?${params}`, token);
-  }
-
-  // The Post-Order API paginates by page number (1-based), not record offset.
-  const first = await fetchPage(1);
-  const seen = new Map<string, any>();
-  for (const m of first.members ?? []) seen.set(m.returnId, m);
-  const totalPages = first.paginationOutput?.totalPages ?? 1;
-  for (let page = 2; page <= totalPages; page++) {
-    const next = await fetchPage(page);
-    const before = seen.size;
-    for (const m of next.members ?? []) seen.set(m.returnId, m);
-    if (seen.size === before) break; // no new records -- stop rather than loop
-  }
-
-  const data = {
-    ...first,
-    members: [...seen.values()].sort((a, b) =>
-      (b.creationInfo?.creationDate?.value ?? "").localeCompare(a.creationInfo?.creationDate?.value ?? "")
-    ),
-  };
+  const members = returns.map((r) => ({ ...r, title: titleOf(r.orderId, r.orderLineItemId, r.itemId) }));
   if (args.json) {
-    console.log(JSON.stringify(data, null, 2));
+    console.log(JSON.stringify({ total: members.length, members }, null, 2));
     return;
   }
 
-  const members: any[] = data.members ?? [];
   console.log(
     `Return requests for ${account} (last ${args.days} days, state=${args.state}): ` +
-      `${members.length} of ${data.total ?? members.length}`
+      `${members.length} of ${members.length}`
   );
 
   if (members.length === 0) {
@@ -107,21 +88,21 @@ async function main() {
   }
 
   for (const r of members) {
-    const detail = r.detail ?? r;
     console.log("----");
-    console.log(`Return ID:   ${r.returnId ?? ""}`);
-    console.log(`State:       ${r.status ?? r.state ?? ""}`);
-    console.log(`Order:       ${pick(detail, "orderId", "creationInfo.orderId", "legacyOrderId") ?? ""}`);
-    console.log(`Item:        ${pick(detail, "itemId", "creationInfo.item.itemId") ?? ""}`);
-    console.log(`Title:       ${pick(detail, "creationInfo.item.itemTitle", "itemTitle") ?? ""}`);
-    console.log(`Buyer:       ${pick(detail, "buyerLoginName", "creationInfo.buyerLoginName", "buyer.loginName") ?? ""}`);
-    console.log(`Reason:      ${pick(detail, "creationInfo.reason", "reason") ?? ""}`);
-    console.log(`Comments:    ${pick(detail, "creationInfo.comments.content", "creationInfo.comments") ?? ""}`);
-    console.log(`Opened:      ${pick(detail, "creationInfo.creationDate.value", "creationDate.value") ?? ""}`);
-    const refund = pick(detail, "creationInfo.requestRefundAmount", "requestRefundAmount", "totalRefundAmount");
-    if (refund) console.log(`Refund req:  ${money(refund)}`);
-    const due = pick(detail, "sellerResponseDue.respondByDate.value", "respondByDate.value");
-    if (due) console.log(`Respond by:  ${due}`);
+    console.log(`Return ID:   ${r.returnId}`);
+    console.log(`State:       ${r.statusCode} (${r.preset}${r.fulfillmentStatus ? `, ${r.fulfillmentStatus}` : ""})`);
+    console.log(`Order:       ${r.orderId}`);
+    console.log(`Item:        ${r.itemId}`);
+    console.log(`Title:       ${r.title}`);
+    console.log(`Buyer:       ${r.buyer}`);
+    console.log(`Reason:      ${r.reasonCode}`);
+    console.log(`Comments:    ${r.note}`);
+    console.log(`Opened:      ${r.requestedAt}`);
+    if (r.closedAt) console.log(`Closed:      ${r.closedAt}`);
+    if (r.offer?.amount) {
+      console.log(`Offer:       ${r.offer.amount.value} ${r.offer.amount.currency} (partial refund, ${r.offer.status})`);
+    }
+    if (r.respondBy) console.log(`Respond by:  ${r.respondBy.dueAt} (${r.respondBy.action})`);
   }
 }
 

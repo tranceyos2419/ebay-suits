@@ -6,28 +6,29 @@
  * multi-item / combined-payment order can be checked against how many units
  * it actually represents.
  *
- * Unlike find_return_by_tracking.ts (which walks the Post-Order API's
- * *return* records), this walks regular orders via the Trading API's
- * GetOrders and inspects each order's (and each transaction's, since
- * multi-leg/dropship orders can carry a tracking number per line item)
- * ShipmentTrackingDetails.
- *
- * GetOrders' CreateTimeFrom/CreateTimeTo window is capped at 30 days, so a
- * wider ask (e.g. a whole month) is walked in 30-day chunks.
+ * Unlike find_return_by_tracking.ts (which walks *return* records), this
+ * walks regular orders. The GraphQL Order API (sellerOrders) lists every
+ * order created in the date range together with its shipments' tracking
+ * numbers, 100 orders per call; each matching order is then read from the
+ * Fulfillment REST API (getOrder + shipping fulfillments), which has the item
+ * titles and which line items each tracking number covers.
  *
  * Usage:
  *   npx tsx src/sales/find_order_by_tracking.ts <tracking-number> --month 2026-07
  *   npx tsx src/sales/find_order_by_tracking.ts <tracking-number> --from 2026-06-20 --to 2026-08-10
  *   npx tsx src/sales/find_order_by_tracking.ts <tracking-number> --account jdm-direct-motors --month 2026-07
  *
- * With no --account, every account in .env (EBAY_ACCOUNTS) is searched (each
- * with its own Auth'n'Auth token, via src/auth/ebay_auth.ts).
+ * With no --account, every account in credentials.json is searched (each
+ * with its own OAuth token, via src/auth/ebay_auth.ts).
  */
 
-import { findBlocks, findText } from "../lib/xml_util.ts";
-import { accountNames, authnAuthToken, die, useAccount } from "../auth/ebay_auth.ts";
-import { fetchOrderBlocks, money, num } from "../lib/trading_api.ts";
+import { accountNames, die, useAccount } from "../auth/ebay_auth.ts";
+import { amount, fulfillmentToken, getOrder, getTracking, type ShipmentTracking } from "../lib/fulfillment_api.ts";
+import { graphqlCallOrThrow, graphqlToken, ORDER_SCOPE } from "../lib/graphql_api.ts";
 import { normalizeTracking as normalize, runMain } from "../lib/util.ts";
+
+/** Kept below 200: at 200 the GraphQL Order API drops the next-page cursor. */
+const PAGE_SIZE = 100;
 
 interface Options {
   tracking: string;
@@ -38,10 +39,11 @@ interface Options {
 
 interface LineItem {
   itemId: string;
-  transactionId: string;
+  lineItemId: string;
   title: string;
   sku: string;
   qty: number;
+  /** Unit price after any promotion discount. */
   price: number;
   currency: string;
   trackingNumbers: string[];
@@ -50,19 +52,15 @@ interface LineItem {
 interface OrderRecord {
   orderId: string;
   created: string;
+  /** "<orderPaymentStatus> / <orderFulfillmentStatus>", e.g. "PAID / FULFILLED". */
   status: string;
+  /** Fulfillment cancelState: NONE_REQUESTED, IN_PROGRESS or CANCELED. */
   cancelStatus: string;
   buyer: string;
+  /** Items + shipping, less refunds (excludes sales tax collected by eBay). */
   total: number;
   currency: string;
-  trackingNumbers: string[]; // order-level
   items: LineItem[];
-}
-
-function trackingNumbersIn(block: string): string[] {
-  return findBlocks(block, "ShipmentTrackingDetails")
-    .map((d) => findText(d, "ShipmentTrackingNumber"))
-    .filter((v): v is string => !!v && v.trim().length > 0);
 }
 
 function parseArgs(argv: string[]): Options {
@@ -105,33 +103,85 @@ function parseArgs(argv: string[]): Options {
   return { tracking, account, from, to };
 }
 
-function accountsToSearch(explicit?: string): { name: string; token: string }[] {
-  const names = explicit ? [useAccount(explicit)] : accountNames();
-  return names.map((name) => ({ name, token: authnAuthToken(name) }));
+const TRACKING_QUERY = `query ($input: OrdersInput!) {
+  orders {
+    sellerOrders(input: $input) {
+      pagination { nextCursor }
+      orders {
+        orderId
+        logistics {
+          fulfillmentExecution {
+            logisticsExecutionSteps {
+              ... on ShippingStep {
+                planOrExecution { ... on ShippingExecutionList { executions { trackingNumber } } }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+/** Ids of the orders created in [from, to] that carry `target` (normalized) on any shipment. */
+async function orderIdsWithTracking(token: string, from: Date, to: Date, target: string): Promise<{ ids: string[]; scanned: number }> {
+  const ids: string[] = [];
+  let scanned = 0;
+  let cursor: string | undefined;
+  do {
+    const input = cursor
+      ? { ordersPage: { maxPageSize: PAGE_SIZE, pageCursor: cursor } }
+      : {
+          ordersFirstPage: {
+            maxPageSize: PAGE_SIZE,
+            filter: {
+              dateRange: { dateType: "CONFIRMED", dateTimeRange: { startDateTime: from.toISOString(), endDateTime: to.toISOString() } },
+              filter: { includeAbandoned: false, includeCancelled: true, includeConfirmed: true, includePlaced: false },
+              sort: { sortField: "CONFIRMED_AT", sortOrder: "DESC" },
+            },
+          },
+        };
+    const data = await graphqlCallOrThrow(token, TRACKING_QUERY, { input });
+    const page = data.orders.sellerOrders;
+    for (const o of page.orders ?? []) {
+      scanned++;
+      const steps: any[] = (o.logistics?.fulfillmentExecution ?? []).flatMap((f: any) => f.logisticsExecutionSteps ?? []);
+      const numbers = steps.flatMap((s) => s.planOrExecution?.executions ?? []).map((e: any) => e.trackingNumber ?? "");
+      if (numbers.some((t: string) => normalize(t) === target) && !ids.includes(o.orderId)) ids.push(o.orderId);
+    }
+    cursor = page.pagination?.nextCursor ?? undefined;
+  } while (cursor);
+  return { ids, scanned };
 }
 
-function parseOrder(o: string): OrderRecord {
-  const total = money(o, "Total");
-  const items: LineItem[] = findBlocks(o, "Transaction").map((t) => ({
-    itemId: findText(t, "ItemID") ?? "",
-    transactionId: findText(t, "TransactionID") ?? "",
-    title: findText(t, "Title") ?? "",
-    sku: findText(t, "SKU") ?? "",
-    qty: num(findText(t, "QuantityPurchased")) || 1,
-    price: money(t, "TransactionPrice").amount,
-    currency: money(t, "TransactionPrice").currency,
-    trackingNumbers: trackingNumbersIn(t),
-  }));
+function parseOrder(o: any, tracking: ShipmentTracking[]): OrderRecord {
+  const lines: any[] = o.lineItems ?? [];
+  const refunded = lines.reduce((s, l) => s + (l.refunds ?? []).reduce((t: number, r: any) => t + amount(r.amount), 0), 0);
+  const items: LineItem[] = lines.map((l) => {
+    const qty = Number(l.quantity) || 1;
+    const lineItemId = String(l.lineItemId ?? "");
+    return {
+      itemId: String(l.legacyItemId ?? ""),
+      lineItemId,
+      title: l.title ?? "",
+      sku: l.sku ?? "",
+      qty,
+      price: amount(l.discountedLineItemCost ?? l.lineItemCost) / qty,
+      currency: (l.discountedLineItemCost ?? l.lineItemCost)?.currency ?? "",
+      trackingNumbers: tracking.filter((t) => t.lineItemIds.includes(lineItemId) && t.trackingNumber).map((t) => t.trackingNumber),
+    };
+  });
   return {
-    orderId: findText(o, "OrderID") ?? "",
-    created: findText(o, "CreatedTime") ?? "",
-    status: findText(o, "OrderStatus") ?? "",
-    cancelStatus: findText(o, "CancelStatus") ?? "",
-    buyer: findText(o, "BuyerUserID") ?? "",
-    total: total.amount,
-    currency: total.currency,
-    trackingNumbers: trackingNumbersIn(o),
-  items,
+    orderId: o.orderId,
+    created: o.creationDate ?? "",
+    status: `${o.orderPaymentStatus ?? ""} / ${o.orderFulfillmentStatus ?? ""}`,
+    cancelStatus: o.cancelStatus?.cancelState ?? "",
+    buyer: o.buyer?.username ?? "",
+    // Line items don't always list refunds issued through a return, so trust
+    // the order's payment status for full refunds.
+    total: o.orderPaymentStatus === "FULLY_REFUNDED" ? 0 : Math.max(0, amount(o.pricingSummary?.total) - refunded),
+    currency: o.pricingSummary?.total?.currency ?? "",
+    items,
   };
 }
 
@@ -140,7 +190,7 @@ function describe(account: string, o: OrderRecord, target: string): string {
   const lines = [
     `[${account}] Order ${o.orderId}`,
     `  Created:      ${o.created}`,
-    `  Status:       ${o.status}${o.cancelStatus && o.cancelStatus !== "NotApplicable" ? ` (cancel: ${o.cancelStatus})` : ""}`,
+    `  Status:       ${o.status}${o.cancelStatus && o.cancelStatus !== "NONE_REQUESTED" ? ` (cancel: ${o.cancelStatus})` : ""}`,
     `  Buyer:        ${o.buyer}`,
     `  Order total:  ${o.total.toFixed(2)} ${o.currency}`,
     `  Line items (${o.items.length}), total units purchased: ${totalQty}`,
@@ -152,7 +202,6 @@ function describe(account: string, o: OrderRecord, target: string): string {
     );
     if (it.trackingNumbers.length) lines.push(`        tracking: ${it.trackingNumbers.join(", ")}`);
   }
-  if (o.trackingNumbers.length) lines.push(`  Order-level tracking: ${o.trackingNumbers.join(", ")}`);
   lines.push(`  Order page: https://www.ebay.com/mesh/ord/details?orderid=${encodeURIComponent(o.orderId)}`);
   return lines.join("\n");
 }
@@ -160,24 +209,24 @@ function describe(account: string, o: OrderRecord, target: string): string {
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const target = normalize(opts.tracking);
-  const accounts = accountsToSearch(opts.account);
+  const names = opts.account ? [useAccount(opts.account)] : accountNames();
 
   let anyMatch = false;
-  for (const { name, token } of accounts) {
+  for (const name of names) {
     console.error(
       `Scanning ${name}: orders created ${opts.from.toISOString().slice(0, 10)} .. ${opts.to.toISOString().slice(0, 10)}...`
     );
-    const orders = (await fetchOrderBlocks(token, opts.from, opts.to)).map(parseOrder);
-    console.error(`  ${orders.length} orders fetched.`);
+    const { ids, scanned } = await orderIdsWithTracking(await graphqlToken(name, [ORDER_SCOPE]), opts.from, opts.to, target);
+    console.error(`  ${scanned} orders scanned.`);
+    if (!ids.length) continue;
 
-    const matches = orders.filter((o) => {
-      const allTracking = [...o.trackingNumbers, ...o.items.flatMap((i) => i.trackingNumbers)];
-      return allTracking.some((t) => normalize(t) === target);
-    });
-
-    for (const o of matches) {
+    const token = await fulfillmentToken(name);
+    for (const id of ids) {
+      const o = await getOrder(token, id);
+      // The date filter's upper bound is inclusive; keep the window half-open.
+      if (!o || Date.parse(o.creationDate) >= opts.to.getTime()) continue;
       anyMatch = true;
-      console.log("\n" + describe(name, o, target));
+      console.log("\n" + describe(name, parseOrder(o, await getTracking(token, id)), target));
     }
   }
 

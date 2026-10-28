@@ -3,52 +3,42 @@
  * find_return_by_tracking.ts -- given a return shipping tracking number, find
  * the eBay return it belongs to and report that return's order number.
  *
- * eBay's Post-Order API has no "search returns by tracking number" filter, so
- * this walks the seller's returns and inspects each return's detail record for
- * tracking numbers. Note the search MUST be given an explicit creation date
- * range: with no range eBay quietly returns only about the last 30 days (44
- * returns on jdm-direct-motors, vs 256 over two years), which silently misses
- * older returns. Hence --days, defaulting to two years.
- * Tracking can show up in several places depending on who bought the label --
- * returnShipmentInfo, the response history, refund detail -- so rather than
- * guessing one path we collect every tracking-shaped field in the record.
+ * eBay's GraphQL Return API has no "search returns by tracking number"
+ * filter, so this walks the seller's returns (open and closed, over --days,
+ * default two years) and checks each return's tracking: the latest package
+ * event per return shipment, plus any return label the seller provided
+ * (src/lib/return_api.ts). The search returns that detail inline, so no
+ * per-return lookups are needed. Returns the Return API can't link to an
+ * order (some old ones) get their order number from the Fulfillment API.
+ *
+ * Only tracking eBay still holds for the return shipment is visible: for a
+ * return that closed without the buyer ever shipping it, the label's
+ * tracking number isn't exposed any more.
  *
  * Usage:
  *   npx tsx src/returns/find_return_by_tracking.ts <tracking-number> --account jdm-direct-motors
  *   npx tsx src/returns/find_return_by_tracking.ts --account jdm-direct-motors --list --days 365
  *
- * Auth: --account <name> (required) -- uses that account's Auth'n'Auth token,
- * which the Post-Order API takes as `Authorization: TOKEN <token>`.
+ * Auth: --account <name> (required) -- uses that account's OAuth token
+ * (sell.return scope) from src/auth/ebay_auth.ts.
  */
 
-import { accountFromArgs, authnAuthToken, die } from "../auth/ebay_auth.ts";
-import { postOrderGet } from "../lib/post_order_api.ts";
-import { DAY_MS, mapLimit, normalizeTracking as normalize, runMain } from "../lib/util.ts";
-
-const PAGE_LIMIT = 50;
-const CONCURRENCY = 5;
+import { accountFromArgs, die } from "../auth/ebay_auth.ts";
+import { fulfillmentToken } from "../lib/fulfillment_api.ts";
+import {
+  fillMissingOrders,
+  type ReturnRecord,
+  type ReturnTracking,
+  returnToken,
+  searchReturns,
+} from "../lib/return_api.ts";
+import { DAY_MS, normalizeTracking as normalize, runMain } from "../lib/util.ts";
 
 interface Options {
   tracking?: string;
   marketplace: string;
   list: boolean;
   days: number;
-}
-
-interface ReturnSummary {
-  returnId: string;
-  orderId?: string;
-  state?: string;
-  buyerLoginName?: string;
-  itemId?: string;
-  transactionId?: string;
-  creationDate?: string;
-}
-
-interface TrackingHit {
-  path: string;
-  value: string;
-  carrier?: string;
 }
 
 function parseArgs(argv: string[]): Options {
@@ -73,110 +63,19 @@ function parseArgs(argv: string[]): Options {
   return opts;
 }
 
-/**
- * Every return on the account, open and closed.
- *
- * Two eBay quirks make the naive version wrong, and both fail *silently*:
- *   1. With no creation date range the search returns only ~the last 30 days.
- *   2. Its `offset` paging is unreliable over a wide range -- it re-serves
- *      records, so a loop that counts rows against totalEntries stops early
- *      and drops returns that really are in range.
- * So: walk the range in 30-day windows, page inside each, and dedupe by
- * returnId, stopping a window only once a page yields nothing new.
- */
-async function fetchAllReturns(
-  token: string,
-  marketplace: string,
-  days: number
-): Promise<ReturnSummary[]> {
-  const byId = new Map<string, ReturnSummary>();
-  const WINDOW_DAYS = 30;
-
-  for (let start = 0; start < days; start += WINDOW_DAYS) {
-    const to = new Date(Date.now() - start * DAY_MS).toISOString();
-    const from = new Date(Date.now() - Math.min(start + WINDOW_DAYS, days) * DAY_MS).toISOString();
-
-    for (let offset = 0; ; ) {
-      const path =
-        `/return/search?role=SELLER&limit=${PAGE_LIMIT}&offset=${offset}` +
-        `&marketplace_id=${marketplace}` +
-        `&creation_date_range_from=${encodeURIComponent(from)}` +
-        `&creation_date_range_to=${encodeURIComponent(to)}`;
-      const body = await postOrderGet(path, token, marketplace);
-      const members: any[] = body.members ?? [];
-      if (members.length === 0) break;
-
-      let added = 0;
-      for (const m of members) {
-        const id = String(m.returnId);
-        if (byId.has(id)) continue;
-        added++;
-        byId.set(id, {
-          returnId: id,
-          orderId: m.orderId,
-          state: m.state,
-          buyerLoginName: m.buyerLoginName,
-          itemId: m.creationInfo?.item?.itemId,
-          transactionId: m.creationInfo?.item?.transactionId,
-          creationDate: m.creationInfo?.creationDate?.value,
-        });
-      }
-      offset += members.length;
-      const total: number = body.paginationOutput?.totalEntries ?? 0;
-      if (added === 0 || offset >= total) break;
-    }
-  }
-  return [...byId.values()];
-}
-
-/**
- * Pull every tracking-shaped value out of a return detail record. Matches
- * either a `*track*` key holding a string, or any object exposing a
- * `trackingNumber` (which is how shipment entries are shaped).
- */
-function collectTracking(node: unknown, path = ""): TrackingHit[] {
-  const hits: TrackingHit[] = [];
-  if (node === null || typeof node !== "object") return hits;
-
-  if (Array.isArray(node)) {
-    node.forEach((v, i) => hits.push(...collectTracking(v, `${path}[${i}]`)));
-    return hits;
-  }
-
-  const obj = node as Record<string, unknown>;
-  const num = obj.trackingNumber;
-  if (typeof num === "string" && num.trim()) {
-    hits.push({
-      path: `${path}.trackingNumber`,
-      value: num.trim(),
-      carrier: typeof obj.carrierUsed === "string" ? obj.carrierUsed
-        : typeof obj.carrierEnum === "string" ? obj.carrierEnum
-        : typeof obj.carrierName === "string" ? obj.carrierName
-        : undefined,
-    });
-  }
-  for (const [k, v] of Object.entries(obj)) {
-    if (k !== "trackingNumber" && /track/i.test(k) && typeof v === "string" && v.trim()) {
-      hits.push({ path: `${path}.${k}`, value: v.trim() });
-    }
-    hits.push(...collectTracking(v, `${path}.${k}`));
-  }
-  return hits;
-}
-
-function describe(r: ReturnSummary, hits: TrackingHit[], rawMatch: boolean): string {
+function describe(r: ReturnRecord, hits: ReturnTracking[], rawMatch: boolean): string {
   const lines = [
-    `  Order number:   ${r.orderId ?? "(none)"}`,
+    `  Order number:   ${r.orderId || "(none)"}`,
     `  Return ID:      ${r.returnId}`,
-    `  Return state:   ${r.state ?? "?"}`,
-    `  Buyer:          ${r.buyerLoginName ?? "?"}`,
-    `  Item ID:        ${r.itemId ?? "?"}`,
-    `  Transaction ID: ${r.transactionId ?? "?"}`,
-    `  Return opened:  ${r.creationDate ?? "?"}`,
+    `  Return state:   ${r.statusCode || "?"} (${r.preset})`,
+    `  Buyer:          ${r.buyer || "?"}`,
+    `  Item ID:        ${r.itemId || "?"}`,
+    `  Transaction ID: ${r.orderLineItemId || "?"}`,
+    `  Return opened:  ${r.requestedAt || "?"}`,
     `  Return page:    https://www.ebay.com/rt/ReturnDetails?returnId=${r.returnId}`,
   ];
   for (const h of hits) {
-    lines.push(`  Tracking:       ${h.value}${h.carrier ? ` (${h.carrier})` : ""}  [${h.path}]`);
+    lines.push(`  Tracking:       ${h.trackingNumber}${h.carrier ? ` (${h.carrier})` : ""}  [${h.source}]`);
   }
   if (rawMatch && hits.length === 0) {
     lines.push("  Tracking:       matched inside the return record (not in a tracking field)");
@@ -187,34 +86,43 @@ function describe(r: ReturnSummary, hits: TrackingHit[], rawMatch: boolean): str
 async function main() {
   const { account, rest } = accountFromArgs(process.argv.slice(2));
   const opts = parseArgs(rest);
-  const token = authnAuthToken(account);
+  const token = await returnToken(account);
   const target = opts.tracking ? normalize(opts.tracking) : undefined;
 
-  const returns = await fetchAllReturns(token, opts.marketplace, opts.days);
-  console.error(
-    `Scanning ${returns.length} returns on ${account} (last ${opts.days} days)...`
-  );
-
-  const scanned = await mapLimit(returns, CONCURRENCY, async (r) => {
-    const detail = await postOrderGet(`/return/${r.returnId}`, token, opts.marketplace);
-    const hits = collectTracking(detail);
-    // Belt and braces: also look at the raw record, in case eBay parks the
-    // number somewhere without "tracking" in the key name.
-    const rawMatch = target ? normalize(JSON.stringify(detail)).includes(target) : false;
-    return { r, hits, rawMatch };
+  const returns = await searchReturns(token, {
+    from: new Date(Date.now() - opts.days * DAY_MS),
+    marketplace: opts.marketplace,
   });
+  console.error(`Scanning ${returns.length} returns on ${account} (last ${opts.days} days)...`);
+
+  const scanned = returns.map((r) => ({
+    r,
+    hits: r.tracking,
+    // Belt and braces: also look at the whole record, in case the number sits
+    // somewhere other than a tracking field.
+    rawMatch: target ? normalize(JSON.stringify(r)).includes(target) : false,
+  }));
+
+  // Fill in order numbers eBay's Return API couldn't resolve -- for every
+  // return when listing, else just for the matches.
+  const fillOrders = async (rs: ReturnRecord[]) => {
+    if (rs.some((r) => !r.orderId)) await fillMissingOrders(await fulfillmentToken(account), rs);
+  };
 
   if (opts.list) {
+    await fillOrders(returns);
     for (const { r, hits } of scanned) {
-      const t = hits.length ? hits.map((h) => h.value).join(", ") : "(no tracking on record)";
-      console.log(`${r.returnId}  order ${r.orderId ?? "?"}  ${(r.state ?? "").padEnd(28)}  ${t}`);
+      const t = hits.length ? hits.map((h) => h.trackingNumber).join(", ") : "(no tracking on record)";
+      console.log(`${r.returnId}  order ${r.orderId || "?"}  ${r.statusCode.padEnd(28)}  ${t}`);
     }
     if (!target) return;
   }
 
   const matches = scanned.filter(
-    ({ hits, rawMatch }) => rawMatch || hits.some((h) => normalize(h.value) === target)
+    ({ hits, rawMatch }) => rawMatch || hits.some((h) => normalize(h.trackingNumber) === target)
   );
+
+  await fillOrders(matches.map((m) => m.r));
 
   if (matches.length === 0) {
     console.log(`\nNo return on this account carries tracking number ${opts.tracking}.`);
@@ -224,7 +132,7 @@ async function main() {
 
   console.log(`\nFound ${matches.length === 1 ? "1 return" : `${matches.length} returns`} for tracking ${opts.tracking}:\n`);
   for (const { r, hits, rawMatch } of matches) {
-    const relevant = hits.filter((h) => normalize(h.value) === target);
+    const relevant = hits.filter((h) => normalize(h.trackingNumber) === target);
     console.log(describe(r, relevant.length ? relevant : hits, rawMatch));
     console.log("");
   }

@@ -1,12 +1,11 @@
 /**
- * ebay_orders.ts -- look up one eBay order by its order number (Trading API
- * GetOrders with OrderIDArray) and parse the parts needed to ship it:
- * address, line items, shipping service/cost and any tracking already on it.
- * Works for orders in any state, including ones already shipped.
+ * ebay_orders.ts -- look up one eBay order by its order number (Fulfillment
+ * API getOrder + its shipping fulfillments) and parse the parts needed to ship
+ * it: address, line items, shipping service/cost and any tracking already on
+ * it. Works for orders in any state, including ones already shipped.
  */
 
-import { money, num, tradingCallOrThrow, unescapeXml } from "./trading_api.ts";
-import { findBlocks, findText } from "./xml_util.ts";
+import { amount, getOrder, getTracking, type ShipmentTracking } from "./fulfillment_api.ts";
 
 export interface EbayAddress {
   name: string;
@@ -27,11 +26,13 @@ export interface EbayOrderItem {
   itemId: string;
   sku: string;
   quantity: number;
+  /** Unit price after any promotion discount. */
   price: number;
 }
 
 export interface EbayOrder {
   orderId: string;
+  /** e.g. "PAID / FULFILLED", or "CANCELED" for a cancelled order. */
   status: string;
   shippedTime: string;
   shippingService: string;
@@ -43,54 +44,74 @@ export interface EbayOrder {
   items: EbayOrderItem[];
 }
 
-const text = (block: string, tag: string) => unescapeXml(findText(block, tag) ?? "").trim();
+/** One ebayCollectAndRemitTaxes entry as Trading wrote it into Street2:
+ *   EU IOSS            "IOSS IM0123456789"
+ *   AU GST (ABN)       "ABN#12345678901 Code:PAID"
+ *   MY SST             "1234567890 Trans Type:LV & Exempt Type:LG"
+ *   import VAT (FR)    "FR12345678901 Import VAT Paid"
+ *   others (UK VAT, NO VOEC, NZ IRD, ...)  "<reference> Code:Paid"
+ * The Fulfillment API has no field for Malaysia's transaction/exemption
+ * type; eBay only collects SST under the low-value-goods scheme, which is
+ * what Trading reported (LV / LG). */
+function taxReferenceText(t: any): string {
+  const ref = t.ebayReference?.value;
+  if (!ref) return "";
+  if (t.ebayReference.name === "IOSS" && /^IM/.test(ref)) return `IOSS ${ref}`;
+  if (/^ABN#/.test(ref)) return `${ref} Code:PAID`;
+  if (t.taxType === "SST") return `${ref} Trans Type:LV & Exempt Type:LG`;
+  if (t.taxType === "IMPORT_VAT") return `${ref} Import VAT Paid`;
+  return `${ref} Code:Paid`;
+}
 
-/** Parse one <Order> block from a GetOrders response. */
-export function parseEbayOrder(o: string): EbayOrder {
-  const addr = findBlocks(o, "ShippingAddress")[0] ?? "";
-  const shipping = findBlocks(o, "ShippingServiceSelected")[0] ?? "";
-  const transactions = findBlocks(o, "Transaction");
+/** Map a Fulfillment API `Order` (plus its tracking) to EbayOrder. */
+export function parseEbayOrder(o: any, tracking: ShipmentTracking[] = []): EbayOrder {
+  const step = o.fulfillmentStartInstructions?.[0]?.shippingStep ?? {};
+  const to = step.shipTo ?? {};
+  const addr = to.contactAddress ?? {};
+  const cancelled = o.cancelStatus?.cancelState === "CANCELED";
+  // eBay's import-tax registration for taxes it collected and remitted (AU
+  // ABN, EU IOSS, UK VAT, ...). Customs needs it on the label, so -- as the
+  // Trading API did -- it is appended to address line 2, in Trading's format.
+  const taxRefs = [
+    ...new Set<string>((o.lineItems ?? []).flatMap((l: any) => (l.ebayCollectAndRemitTaxes ?? []).map(taxReferenceText).filter(Boolean))),
+  ];
   return {
-    orderId: text(o, "OrderID"),
-    status: text(o, "OrderStatus"),
-    shippedTime: text(o, "ShippedTime"),
-    shippingService: text(shipping, "ShippingService"),
-    shippingCost: money(shipping, "ShippingServiceCost").amount,
-    currency: money(o, "Total").currency,
-    tracking: findBlocks(o, "ShipmentTrackingDetails").map((d) =>
-      `${text(d, "ShippingCarrierUsed")} ${text(d, "ShipmentTrackingNumber")}`.trim()
-    ),
+    orderId: o.orderId,
+    status: cancelled ? "CANCELED" : `${o.orderPaymentStatus ?? ""} / ${o.orderFulfillmentStatus ?? ""}`,
+    shippedTime: tracking.map((t) => t.shippedDate).filter(Boolean).sort()[0] ?? "",
+    shippingService: step.shippingServiceCode ?? "",
+    shippingCost: amount(o.pricingSummary?.deliveryCost),
+    currency: o.pricingSummary?.total?.currency ?? "",
+    tracking: tracking.map((t) => `${t.carrier} ${t.trackingNumber}`.trim()),
     address: {
-      name: text(addr, "Name"),
-      company: text(addr, "CompanyName"),
-      street1: text(addr, "Street1"),
-      street2: text(addr, "Street2"),
-      city: text(addr, "CityName"),
-      state: text(addr, "StateOrProvince"),
-      zip: text(addr, "PostalCode"),
-      country: text(addr, "Country"),
-      phone: text(addr, "Phone"),
-      email: transactions.map((t) => text(t, "Email")).find((e) => e.includes("@")) ?? "",
+      name: (to.fullName ?? "").trim(),
+      company: (to.companyName ?? "").trim(),
+      street1: (addr.addressLine1 ?? "").trim(),
+      street2: [(addr.addressLine2 ?? "").trim(), ...taxRefs].filter(Boolean).join(" "),
+      city: (addr.city ?? "").trim(),
+      state: (addr.stateOrProvince ?? "").trim(),
+      zip: (addr.postalCode ?? "").trim(),
+      country: (addr.countryCode ?? "").trim(),
+      phone: (to.primaryPhone?.phoneNumber ?? "").trim(),
+      email: (to.email ?? "").includes("@") ? to.email.trim() : "",
     },
-    items: transactions.map((t) => ({
-      title: text(t, "Title"),
-      itemId: text(t, "ItemID"),
-      sku: text(t, "SKU"),
-      quantity: num(findText(t, "QuantityPurchased")) || 1,
-      price: money(t, "TransactionPrice").amount,
-    })),
+    items: (o.lineItems ?? []).map((l: any) => {
+      const quantity = Number(l.quantity) || 1;
+      return {
+        title: (l.title ?? "").trim(),
+        itemId: String(l.legacyItemId ?? ""),
+        sku: l.sku ?? "",
+        quantity,
+        // After promotions, like Trading's TransactionPrice.
+        price: Math.round((amount(l.discountedLineItemCost ?? l.lineItemCost) / quantity) * 100) / 100,
+      };
+    }),
   };
 }
 
 /** The eBay order `orderId` on the token's account, or undefined if that account doesn't have it. */
 export async function fetchEbayOrder(token: string, orderId: string): Promise<EbayOrder | undefined> {
-  const { xml } = await tradingCallOrThrow(
-    token,
-    "GetOrders",
-    `  <OrderIDArray><OrderID>${orderId}</OrderID></OrderIDArray>
-  <OrderRole>Seller</OrderRole>
-  <DetailLevel>ReturnAll</DetailLevel>`
-  );
-  const block = findBlocks(xml, "Order")[0];
-  return block ? parseEbayOrder(block) : undefined;
+  const o = await getOrder(token, orderId);
+  if (!o) return undefined;
+  return parseEbayOrder(o, await getTracking(token, orderId));
 }

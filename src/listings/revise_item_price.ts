@@ -1,38 +1,37 @@
 #!/usr/bin/env -S npx tsx
 /**
- * revise_item_price.ts -- update the StartPrice/BuyItNowPrice of a fixed-price
- * listing via the Trading API's ReviseItem call.
+ * revise_item_price.ts -- set the fixed price of one of our single-SKU
+ * listings through the GraphQL Listing API's updateListing mutation
+ * (scope sell.listing).
+ *
+ * --validate asks eBay to check the change without applying it.
  *
  * Usage:
- *   npx tsx src/listings/revise_item_price.ts --account <name> <ITEM_ID> <NEW_PRICE>
+ *   npx tsx src/listings/revise_item_price.ts --account <name> [--validate] <ITEM_ID> <NEW_PRICE>
  */
 
-import { findText } from "../lib/xml_util.ts";
-import { accountFromArgs, authnAuthToken, die } from "../auth/ebay_auth.ts";
-import { printErrors, tradingCall } from "../lib/trading_api.ts";
+import { accountFromArgs, die } from "../auth/ebay_auth.ts";
+import { listingToken, updatePrice } from "../lib/listing_api.ts";
 import { runMain } from "../lib/util.ts";
 
 async function main() {
-  const { account, rest } = accountFromArgs(process.argv.slice(2));
+  const { account, rest: args } = accountFromArgs(process.argv.slice(2));
+  const validateOnly = args.includes("--validate");
+  const rest = args.filter((a) => a !== "--validate");
   const [itemId, newPrice] = rest;
-  if (!itemId || !newPrice || rest.length !== 2) {
-    die("Usage: npx tsx src/listings/revise_item_price.ts --account <name> <ITEM_ID> <NEW_PRICE>");
+  if (!itemId || !newPrice || rest.length !== 2 || !(Number(newPrice) > 0)) {
+    die("Usage: npx tsx src/listings/revise_item_price.ts --account <name> [--validate] <ITEM_ID> <NEW_PRICE>");
   }
 
-  const r = await tradingCall(
-    authnAuthToken(account),
-    "ReviseItem",
-    `  <Item>
-    <ItemID>${itemId}</ItemID>
-    <StartPrice>${newPrice}</StartPrice>
-  </Item>`
-  );
-  console.log(`Ack: ${r.ack}`);
-  printErrors(r.errors);
+  const r = await updatePrice(await listingToken(account), itemId, newPrice, { validateOnly });
+  console.log(`Result: ${r.ok ? "Success" : "Failure"}${validateOnly ? " (validate only)" : ""}`);
+  for (const e of r.errors) console.log(`  [Error] ${e}`);
+  for (const w of r.warnings) console.log(`  [Warning] ${w}`);
 
   if (r.ok) {
-    const fees = findText(r.xml, "Fee") ?? "";
-    console.log(`Item ${itemId} revised. StartPrice: ${newPrice}${fees ? ` (fee: ${fees})` : ""}`);
+    console.log(validateOnly ? `Item ${itemId}: price ${newPrice} is valid (not applied).` : `Item ${itemId} revised. Price: ${newPrice}`);
+  } else {
+    process.exit(1);
   }
 }
 

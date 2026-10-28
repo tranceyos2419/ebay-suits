@@ -1,33 +1,26 @@
 #!/usr/bin/env -S npx tsx
 /**
- * revise_item_quantity.ts -- set the available quantity of one or more
- * fixed-price listings via the Trading API's ReviseInventoryStatus call.
+ * revise_item_quantity.ts -- set the available quantity of one or more of our
+ * fixed-price listings through the GraphQL Listing API's bulkUpdateInventory
+ * mutation (scope sell.listing).
  * Each item is revised in its own call so one failure doesn't block the rest.
  *
  * Usage:
  *   npx tsx src/listings/revise_item_quantity.ts --account <name> --quantity <N> <ITEM_ID> [ITEM_ID ...]
  */
 
-import { findText } from "../lib/xml_util.ts";
-import { accountFromArgs, authnAuthToken, die } from "../auth/ebay_auth.ts";
-import { printErrors, tradingCall } from "../lib/trading_api.ts";
+import { accountFromArgs, die } from "../auth/ebay_auth.ts";
+import { listingToken, updateInventory } from "../lib/listing_api.ts";
 import { runMain } from "../lib/util.ts";
 
 const USAGE =
   "Usage: npx tsx src/listings/revise_item_quantity.ts --account <name> --quantity <N> <ITEM_ID> [ITEM_ID ...]";
 
 async function reviseQuantity(token: string, itemId: string, quantity: number): Promise<boolean> {
-  const r = await tradingCall(
-    token,
-    "ReviseInventoryStatus",
-    `  <InventoryStatus>
-    <ItemID>${itemId}</ItemID>
-    <Quantity>${quantity}</Quantity>
-  </InventoryStatus>`
-  );
-  const newQty = findText(r.xml, "Quantity");
-  console.log(`${itemId}: ${r.ack}${r.ok && newQty ? ` (quantity now ${newQty})` : ""}`);
-  printErrors(r.errors);
+  const r = await updateInventory(token, { listingId: itemId }, { quantity });
+  console.log(`${itemId}: ${r.ok ? "Success" : "Failure"}${r.ok ? ` (quantity now ${quantity})` : ""}`);
+  for (const e of r.errors) console.log(`  [Error] ${e}`);
+  for (const w of r.warnings) console.log(`  [Warning] ${w}`);
   return r.ok;
 }
 
@@ -39,7 +32,7 @@ async function main() {
   const itemIds = rest.filter((_, i) => i !== qIdx && i !== qIdx + 1);
   if (!Number.isInteger(quantity) || quantity < 0 || itemIds.length === 0) die(USAGE);
 
-  const token = authnAuthToken(account);
+  const token = await listingToken(account);
   let failures = 0;
   for (const itemId of itemIds) {
     if (!(await reviseQuantity(token, itemId, quantity))) failures++;

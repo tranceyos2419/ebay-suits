@@ -12,7 +12,17 @@ import { oauthToken } from "../auth/ebay_auth.ts";
 import { sleep } from "./util.ts";
 
 export const GRAPHQL_API = "https://graphqlapi.ebay.com/graphql";
+export const GRAPHQL_API_SANDBOX = "https://graphqlapi.sandbox.ebay.com/graphql";
 const MAX_RETRIES = 4;
+
+/** Where every call in this process goes (Production unless switched). */
+let endpoint = GRAPHQL_API;
+
+/** Send every following call to eBay's Sandbox (true) or Production (false).
+ * For tools with a --sandbox mode; the token must then be a Sandbox token. */
+export function useGraphqlSandbox(sandbox: boolean): void {
+  endpoint = sandbox ? GRAPHQL_API_SANDBOX : GRAPHQL_API;
+}
 
 export const LISTING_SCOPE = "https://api.ebay.com/oauth/api_scope/sell.listing";
 export const ORDER_SCOPE = "https://api.ebay.com/oauth/api_scope/sell.order";
@@ -35,7 +45,7 @@ export function graphqlToken(account: string, scopes: string[]): Promise<string>
   return oauthToken(account, scopes);
 }
 
-/** Run `query` with `variables`, retrying 429s and 5xx with backoff. */
+/** Run `query` with `variables`, retrying network errors, 429s and 5xx with backoff. */
 export async function graphqlCall<T = any>(
   token: string,
   query: string,
@@ -43,15 +53,22 @@ export async function graphqlCall<T = any>(
   marketplace = "EBAY_US"
 ): Promise<GraphqlResponse<T>> {
   for (let attempt = 0; ; attempt++) {
-    const resp = await fetch(GRAPHQL_API, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-        "X-EBAY-C-MARKETPLACE-ID": marketplace,
-      },
-      body: JSON.stringify({ query, variables }),
-    });
+    let resp: Response;
+    try {
+      resp = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+          "X-EBAY-C-MARKETPLACE-ID": marketplace,
+        },
+        body: JSON.stringify({ query, variables }),
+      });
+    } catch (err) {
+      if (attempt >= MAX_RETRIES) throw err;
+      await sleep(2000 * (attempt + 1));
+      continue;
+    }
     if ((resp.status === 429 || resp.status >= 500) && attempt < MAX_RETRIES) {
       await sleep(2000 * (attempt + 1));
       continue;

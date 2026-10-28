@@ -24,7 +24,8 @@
  *   npx tsx src/shipping/create_shipandco_order.ts --account jdm-direct-motors 26-15152-00011 --create
  */
 
-import { accountFromArgs, authnAuthToken, die } from "../auth/ebay_auth.ts";
+import { accountFromArgs, die } from "../auth/ebay_auth.ts";
+import { fulfillmentToken } from "../lib/fulfillment_api.ts";
 import { adjustmentsFromArgs, describeResult, loadReviewedNames, uploadEbayOrder } from "../lib/ebay_to_shipandco.ts";
 import { listApiOrders } from "../lib/shipandco_orders.ts";
 import { runMain } from "../lib/util.ts";
@@ -37,7 +38,7 @@ async function main() {
   const reviewedNames = loadReviewedNames(namesAt >= 0 ? rest[namesAt + 1] : undefined);
   const orderIds = rest.filter((a, i) => a !== "--create" && (namesAt < 0 || (i !== namesAt && i !== namesAt + 1)));
   if (!orderIds.length) die("Usage: create_shipandco_order.ts --account <name> <ebay-order-id>... [--create] [--names <file.json>] [--ddp] [--price-from-shipping] [--gift] [--price-cap]");
-  const token = authnAuthToken(account);
+  const token = await fulfillmentToken(account);
   const existing = await listApiOrders();
 
   for (const id of orderIds) {

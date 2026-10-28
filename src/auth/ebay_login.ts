@@ -16,12 +16,12 @@
  *   2. eBay sends the browser to the app's "auth accepted" page. Copy that
  *      page's full address from the address bar and paste it back here
  *      (just the code= value works too). The code is only valid ~5 minutes.
- *   3. It swaps the code for access + refresh tokens, checks with GetUser that
+ *   3. It swaps the code for access + refresh tokens, checks with the Identity API that
  *      they belong to the right eBay user, and only then saves them.
  *
  * Non-interactive: pass the pasted address/code with --code '<...>'.
  *
- * Needs EBAY_APP_CLIENT_ID, EBAY_APP_CLIENT_SECRET and EBAY_APP_RU_NAME in .env, and the
+ * Needs "app" { clientId, clientSecret, ruName } in credentials.json, and the
  * RuName must have OAuth enabled (developer.ebay.com -> User Tokens ->
  * "Your eBay Sign-in Settings").
  */
@@ -30,7 +30,6 @@ import { randomBytes } from "node:crypto";
 import { createInterface } from "node:readline/promises";
 import {
   accountFromArgs,
-  authnAuthToken,
   die,
   expandScope,
   getAccount,
@@ -45,8 +44,8 @@ import {
 const AUTHORIZE_URL = "https://auth.ebay.com/oauth2/authorize";
 
 // Asked for once at sign-in, so a script using another of these APIs later
-// doesn't need a new sign-in. api_scope is the base scope; the Trading API
-// (GetUser, for the identity check below) accepts a token carrying it.
+// doesn't need a new sign-in. api_scope is the base scope;
+// commerce.identity.readonly is needed for the identity check below.
 // sell.listing / sell.order / sell.return / commerce.message are the
 // Modernized APIs that replace Trading and Post-Order (src/lib/graphql_api.ts).
 const DEFAULT_SCOPES = [
@@ -75,8 +74,10 @@ function parseArgs(argv: string[]): { account: string; scopes: string[]; code?: 
     else die(`ERROR: unknown argument ${a}`);
   }
   const chosen = scopes?.length ? scopes : DEFAULT_SCOPES;
-  // GetUser (the identity check) needs the base scope.
-  if (!chosen.map(expandScope).includes(expandScope("api_scope"))) chosen.unshift("api_scope");
+  // The identity check needs commerce.identity.readonly; keep the base scope too.
+  for (const required of ["commerce.identity.readonly", "api_scope"]) {
+    if (!chosen.map(expandScope).includes(expandScope(required))) chosen.unshift(required);
+  }
   return { account, scopes: [...new Set(chosen.map(expandScope))], code };
 }
 
@@ -100,7 +101,7 @@ function extractCode(input: string): { code: string; state?: string } {
 async function main() {
   const { account, scopes, code: codeArg } = parseArgs(process.argv.slice(2));
   const app = loadCredentials().app;
-  if (!app?.ruName) die("ERROR: .env has no EBAY_APP_RU_NAME (the app's RuName / redirect_uri).");
+  if (!app?.ruName) die('ERROR: credentials.json has no "app".ruName (the app\'s RuName / redirect_uri).');
 
   let pasted = codeArg;
   const state = randomBytes(12).toString("hex");
@@ -150,7 +151,7 @@ async function main() {
     die(`ERROR: couldn't confirm which eBay user signed in (${(err as Error).message}). Nothing was saved.`);
   }
   const current = getAccount(account);
-  const expected = current.ebayUserId ?? (current.authnauth?.token ? await getUserId(authnAuthToken(account)) : undefined);
+  const expected = current.ebayUserId;
   if (expected && expected.toLowerCase() !== signedInAs.toLowerCase()) {
     die(
       `ERROR: the browser signed in as eBay user '${signedInAs}', but ${account} is '${expected}'.\n` +

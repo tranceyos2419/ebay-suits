@@ -4,17 +4,22 @@
  *
  * Small CLI to:
  *   1. List your eBay store's shipping (fulfillment) policies  [Account API]
- *   2. Reassign a shipping policy to specific classic listings  [Trading API ReviseItem]
+ *   2. Reassign a shipping policy to specific listings  [GraphQL Listing API updateListing]
  *
- * Auth
- * ----
- * Every command needs --account <name>; tokens come from src/auth/ebay_auth.ts:
- *   - Account API (list-policies, swap-rate-table): an OAuth user token with
- *     scope sell.account, refreshed automatically. The account needs an
- *     OAuth sign-in first (src/auth/ebay_login.ts).
- *   - Trading API (everything else): the account's Auth'n'Auth token.
- * With --sandbox, the Production tokens in .env aren't used:
- * put a Sandbox user token in EBAY_SANDBOX_TOKEN in .env instead of --account.
+ * APIs and auth
+ * -------------
+ * Every command needs --account <name>; tokens come from src/auth/ebay_auth.ts
+ * (OAuth user tokens, refreshed automatically; the account needs an OAuth
+ * sign-in first, src/auth/ebay_login.ts):
+ *   - Account API (REST, scope sell.account): list-policies, swap-rate-table,
+ *     and the policy NAMES shown elsewhere (the Listing API returns only a
+ *     listing's policy id).
+ *   - GraphQL Listing API (scope sell.listing, src/lib/listing_api.ts):
+ *     reading listings (getListing / active-listing search) and changing their
+ *     shipping policy (updateListing; validate-only for check-access).
+ * With --sandbox, credentials.json isn't used (it holds Production tokens): put a
+ * Sandbox user token (with both scopes) in EBAY_SANDBOX_TOKEN instead of
+ * --account, and calls go to the Sandbox REST and GraphQL endpoints.
  *
  * Usage
  * -----
@@ -22,7 +27,7 @@
  *   npx tsx src/listings/ebay_shipping_policy_tool.ts --account jdm-direct-motors list-policies
  *
  *   # 2. Confirm you can read listings, and that an edit WOULD succeed, without
- *   #    changing anything (uses GetItem [read] + VerifyReviseItem [validate-only]).
+ *   #    changing anything (uses getListing [read] + updateListing in VALIDATE mode).
  *   npx tsx src/listings/ebay_shipping_policy_tool.ts --account jdm-direct-motors check-access \
  *       --item-ids 110123456789 110987654321 \
  *       --policy-id 123456789012
@@ -53,9 +58,9 @@
  *   # data/policy-ranges/*.json for the format and a real example, captured
  *   # from the account's Business Policies page (bp/manage). Both flags are
  *   # optional and independent; omitting either falls back to a full-store
- *   # scan for that part, which is capped at 25,000 active listings by
- *   # GetMyeBaySelling (see the NOTE above scanActiveListings in the source
- *   # for why that matters on a larger store).
+ *   # scan of every active listing for that part (Listing API search, read
+ *   # in start-time slices to get past its 50,000-result cap; ~0.4 s per
+ *   # 200 listings, so ~3-4 min on a 100k-listing store).
  *   npx tsx src/listings/ebay_shipping_policy_tool.ts --account jdm-direct-motors migrate-by-price \
  *       --from-policy-id 273300062012 272284104012 272285920012 \
  *       --report-out reports/copy-cleanup.csv \
@@ -74,24 +79,25 @@
  *   #    (id, name, and how many scanned listings currently sit on it) --
  *   #    e.g. to find the policyId of a decoy/"Copy" policy you only know by
  *   #    name, so it can be passed as --from-policy-id above. Same full-store
- *   #    scan and 25,000-listing cap as migrate-by-price's fallback path --
- *   #    see the NOTE above scanActiveListings. Optional --name-contains
+ *   #    scan as migrate-by-price's fallback path. Optional --name-contains
  *   #    filters the printed list (case-insensitive substring on the policy
  *   #    name); omit it to see everything found.
  *   npx tsx src/listings/ebay_shipping_policy_tool.ts --account jdm-direct-motors scan-policies --name-contains copy
  *
  * Flags
  * -----
- *   --account        Seller account in .env (required unless --sandbox).
+ *   --account        Seller account in credentials.json (required unless --sandbox).
  *   --sandbox        Use eBay Sandbox endpoints instead of Production.
  *   --marketplace    Marketplace ID for the Account API (default EBAY_US).
- *   --site-id        Trading API SiteID (default 0 = US).
+ *                     Listing updates always use each listing's own
+ *                     marketplace (e.g. EBAY_AU), read from the listing.
+ *   --site-id        Ignored (was the Trading API SiteID); kept so old
+ *                     command lines still run.
  *   --from-policy-id Source fulfillment policy ID (migrate-by-price).
  *   --report-out     CSV report path (migrate-by-price).
  *   --items-file     Scraped "itemId,price" list, one per line, no header
  *                     (migrate-by-price dry-run). Omit to fall back to a
- *                     full-store scan (see warning above -- undercounts on
- *                     stores over ~25,000 active listings).
+ *                     full-store scan.
  *   --ranges-file    JSON price-tier policy catalog, see
  *                     data/policy-ranges/*.json (migrate-by-price dry-run).
  *                     Omit to fall back to discovering ranges from a listing
@@ -105,18 +111,18 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { findBlocks, findText } from "../lib/xml_util.ts";
-import { accountFromArgs, authnAuthToken, die, oauthToken } from "../auth/ebay_auth.ts";
-import { readEnvFile } from "../lib/env_file.ts";
+import { accountFromArgs, die, oauthToken } from "../auth/ebay_auth.ts";
 import { csvCell, parseCsv } from "../lib/csv.ts";
+import { useGraphqlSandbox } from "../lib/graphql_api.ts";
 import {
-  TRADING_API,
-  TRADING_API_SANDBOX,
-  printErrors,
-  tradingCall,
-  tradingRequestXml,
-  type TradingResponse,
-} from "../lib/trading_api.ts";
+  countActiveListings,
+  getListing,
+  listingToken,
+  MAX_SEARCH_RESULTS,
+  searchActiveListings,
+  updateShippingPolicy,
+  type UpdateResult,
+} from "../lib/listing_api.ts";
 import { runMain, sleep } from "../lib/util.ts";
 
 type Env = "prod" | "sandbox";
@@ -125,18 +131,13 @@ const ACCOUNT_API_HOST: Record<Env, string> = {
   prod: "https://api.ebay.com",
   sandbox: "https://api.sandbox.ebay.com",
 };
-const TRADING_API_HOST: Record<Env, string> = {
-  prod: TRADING_API,
-  sandbox: TRADING_API_SANDBOX,
-};
-
 const ACCOUNT_API_SCOPE = "sell.account";
 
 /** Seller account from --account; set once in main(). */
 let account = "";
 
 function sandboxToken(): string {
-  return readEnvFile().EBAY_SANDBOX_TOKEN || die("ERROR: --sandbox needs a Sandbox user token in EBAY_SANDBOX_TOKEN in .env.");
+  return process.env.EBAY_SANDBOX_TOKEN ?? die("ERROR: --sandbox needs a Sandbox user token in EBAY_SANDBOX_TOKEN.");
 }
 
 /** OAuth user token for the Account API (REST). */
@@ -144,9 +145,9 @@ async function accountApiToken(env: Env): Promise<string> {
   return env === "sandbox" ? sandboxToken() : oauthToken(account, [ACCOUNT_API_SCOPE]);
 }
 
-/** Token for Trading API calls: the account's Auth'n'Auth token. */
-function tradingApiToken(env: Env): string {
-  return env === "sandbox" ? sandboxToken() : authnAuthToken(account);
+/** OAuth user token for the GraphQL Listing API. */
+async function listingApiToken(env: Env): Promise<string> {
+  return env === "sandbox" ? sandboxToken() : listingToken(account);
 }
 
 /** Fetch every fulfillment policy for a marketplace via the Account API
@@ -276,82 +277,126 @@ async function listPolicies(env: Env, marketplaceId: string) {
   }
 }
 
-/** Inner XML of a (Verify)ReviseItem request moving an item to a shipping policy. */
-function reviseItemBody(itemId: string, policyId: string): string {
-  return `  <Item>
-    <ItemID>${itemId}</ItemID>
-    <SellerProfiles>
-      <SellerShippingProfile>
-        <ShippingProfileID>${policyId}</ShippingProfileID>
-      </SellerShippingProfile>
-    </SellerProfiles>
-  </Item>`;
+// ---- policy names: the Listing API returns only a listing's policy id, so
+// names come from the Account API, one fetch per marketplace seen. ----
+
+const policyNames = new Map<string, string>();
+const policyMarketplacesFetched = new Set<string>();
+
+/** Name of fulfillment policy `policyId` ("" if unknown), looking it up in
+ * the policies of `marketplace` (the listing's own, e.g. EBAY_AU) on first
+ * use. A failed lookup is reported once and leaves the name blank. */
+async function policyName(env: Env, marketplace: string, policyId: string): Promise<string> {
+  if (!policyId) return "";
+  if (!policyNames.has(policyId) && marketplace && !policyMarketplacesFetched.has(marketplace)) {
+    policyMarketplacesFetched.add(marketplace);
+    const url = `${ACCOUNT_API_HOST[env]}/sell/account/v1/fulfillment_policy?marketplace_id=${marketplace}`;
+    const resp = await fetch(url, {
+      headers: { Authorization: `Bearer ${await accountApiToken(env)}`, Accept: "application/json" },
+    });
+    if (resp.ok) {
+      const data = (await resp.json()) as { fulfillmentPolicies?: Array<{ fulfillmentPolicyId?: string; name?: string }> };
+      for (const p of data.fulfillmentPolicies ?? []) {
+        if (p.fulfillmentPolicyId) policyNames.set(p.fulfillmentPolicyId, (p.name ?? "").trim());
+      }
+    } else {
+      console.error(`WARNING: could not read ${marketplace} policy names (HTTP ${resp.status}); names left blank.`);
+    }
+  }
+  return policyNames.get(policyId) ?? "";
 }
 
-/** POST a Trading API call with this env's endpoint and token. */
-function callTradingApi(
+// ---- reading listings and moving them to a policy (GraphQL Listing API) ----
+
+/** The updateListing input that moves a listing to a shipping policy (for --dry-run output). */
+function updateListingInput(itemId: string, policyId: string, marketplace: string) {
+  return {
+    listingIdentifier: { listingId: itemId },
+    marketplace,
+    listingTerms: { fulfillmentTerms: { shippingTerms: { businessPolicy: { businessPolicyId: policyId } } } },
+  };
+}
+
+/** Trading-style Ack for an update result, to keep the old output format. */
+function ackOf(r: UpdateResult): string {
+  return !r.ok ? "Failure" : r.warnings.length ? "Warning" : "Success";
+}
+
+/** Print an update's warnings/errors; true unless there was an error. */
+function printUpdateMessages(r: UpdateResult): boolean {
+  for (const w of r.warnings) console.log(`  [Warning] ${w}`);
+  for (const e of r.errors) console.log(`  [Error] ${e.trim()}`);
+  return r.ok;
+}
+
+/** Move one listing to `policyId` -- or, with validateOnly, ask eBay whether
+ * that WOULD succeed without applying it. Reads the listing first for its
+ * marketplace (updates must name it). */
+async function updateItemPolicy(
   env: Env,
-  callName: string,
-  inner: string,
-  siteId: number,
-  headers?: Record<string, string>
-): Promise<TradingResponse> {
-  return tradingCall(tradingApiToken(env), callName, inner, { siteId, url: TRADING_API_HOST[env], headers });
+  itemId: string,
+  policyId: string,
+  validateOnly: boolean
+): Promise<UpdateResult> {
+  const token = await listingApiToken(env);
+  const listing = await getListing(token, itemId);
+  if (!listing) return { ok: false, errors: [`listing ${itemId} not found (wrong ID, not ours, or no longer available)`], warnings: [] };
+  return updateShippingPolicy(token, itemId, policyId, { validateOnly, marketplace: listing.marketplace || "EBAY_US" });
 }
 
-async function reviseItem(env: Env, itemId: string, policyId: string, siteId: number, dryRun: boolean): Promise<boolean> {
-  const body = reviseItemBody(itemId, policyId);
-
+async function reviseItem(env: Env, itemId: string, policyId: string, dryRun: boolean): Promise<boolean> {
   if (dryRun) {
     console.log(`[DRY RUN] Would revise Item ${itemId} -> ShippingProfileID ${policyId}`);
-    console.log(tradingRequestXml("ReviseItem", body));
+    console.log(`updateListing input: ${JSON.stringify(updateListingInput(itemId, policyId, "<listing's marketplace>"))}`);
     console.log();
     return true;
   }
 
-  const r = await callTradingApi(env, "ReviseItem", body, siteId);
-  console.log(`Item ${itemId}: Ack=${r.ack}`);
-  const noHardErrors = printErrors(r.errors);
-  return r.ok && noHardErrors;
+  const r = await updateItemPolicy(env, itemId, policyId, false);
+  console.log(`Item ${itemId}: Ack=${ackOf(r)}`);
+  return printUpdateMessages(r);
 }
 
-const getItemBody = (itemId: string) => `  <ItemID>${itemId}</ItemID>
-  <DetailLevel>ReturnAll</DetailLevel>`;
-
 /** Read-only: fetch an item's title and current shipping profile. Proves read access. */
-async function getItem(env: Env, itemId: string, siteId: number): Promise<string | null> {
-  const { xml, ok, ack, errors } = await callTradingApi(env, "GetItem", getItemBody(itemId), siteId);
-  if (!ok) {
-    console.log(`  READ  Item ${itemId}: Ack=${ack} (could not read this item)`);
-    printErrors(errors);
+async function getItem(env: Env, itemId: string): Promise<string | null> {
+  let listing;
+  try {
+    listing = await getListing(await listingApiToken(env), itemId);
+  } catch (err) {
+    console.log(`  READ  Item ${itemId}: Ack=Failure (could not read this item)`);
+    console.log(`  [Error] ${(err as Error).message}`);
     return null;
   }
-  const title = findText(xml, "Title") ?? "(no title)";
-  const currentProfileId = findText(xml, "ShippingProfileID") ?? "(none)";
-  const currentProfileName = findText(xml, "ShippingProfileName") ?? "";
+  if (!listing) {
+    console.log(`  READ  Item ${itemId}: Ack=Failure (could not read this item)`);
+    console.log(`  [Error] not found (wrong ID, not ours, or no longer available)`);
+    return null;
+  }
+  const title = listing.title || "(no title)";
+  const currentProfileId = listing.shippingPolicyId || "(none)";
+  const currentProfileName = await policyName(env, listing.marketplace, listing.shippingPolicyId);
   console.log(`  READ  Item ${itemId}: "${title}" -- current ShippingProfileID=${currentProfileId} (${currentProfileName})`);
   return currentProfileId;
 }
 
 /** Validate-only: ask eBay whether this revision WOULD succeed, without applying it. */
-async function verifyReviseItem(env: Env, itemId: string, policyId: string, siteId: number): Promise<boolean> {
-  const r = await callTradingApi(env, "VerifyReviseItem", reviseItemBody(itemId, policyId), siteId);
-  console.log(`  VERIFY Item ${itemId} -> ShippingProfileID ${policyId}: Ack=${r.ack} (no change was made)`);
-  const noHardErrors = printErrors(r.errors);
-  return r.ok && noHardErrors;
+async function verifyReviseItem(env: Env, itemId: string, policyId: string): Promise<boolean> {
+  const r = await updateItemPolicy(env, itemId, policyId, true);
+  console.log(`  VERIFY Item ${itemId} -> ShippingProfileID ${policyId}: Ack=${ackOf(r)} (no change was made)`);
+  return printUpdateMessages(r);
 }
 
-async function checkAccess(env: Env, itemIds: string[], policyId: string | undefined, siteId: number) {
-  console.log("Checking read access (GetItem) and, if --policy-id given, edit capability (VerifyReviseItem)...\n");
+async function checkAccess(env: Env, itemIds: string[], policyId: string | undefined) {
+  console.log("Checking read access (getListing) and, if --policy-id given, edit capability (updateListing, validate-only)...\n");
   let allOk = true;
   for (const itemId of itemIds) {
-    const currentProfileId = await getItem(env, itemId, siteId);
+    const currentProfileId = await getItem(env, itemId);
     if (currentProfileId === null) {
       allOk = false;
       continue;
     }
     if (policyId) {
-      const ok = await verifyReviseItem(env, itemId, policyId, siteId);
+      const ok = await verifyReviseItem(env, itemId, policyId);
       allOk = allOk && ok;
     }
     console.log();
@@ -368,33 +413,23 @@ async function checkAccess(env: Env, itemIds: string[], policyId: string | undef
 // into whichever price-range policy ("$<min> - $<max>", nothing else) their
 // current price falls into. ----
 //
-// NOTE on approach: an earlier version of this discovered both the item list
-// and the policy catalog by paging through GetMyeBaySelling (Trading API) for
-// every active listing. That's unreliable for a large store: GetMyeBaySelling
-// hard-caps at 25,000 returned entries. On a store with more active listings
-// than that, a meaningful tail (skewed toward newer items -- exactly where a
-// recently-introduced policy tends to concentrate) is structurally
-// unreachable through that call, regardless of pagination or sort order.
-// Confirmed live against jdm-direct-motors (~32,000+ active listings): the
-// capped scan found only 78-80 of a source policy's listings against a true
-// count of 215 per eBay's own Seller Hub filter.
+// NOTE on approach: this used to page Trading GetMyeBaySelling for the item
+// list and the policy catalog, which hard-caps at 25,000 entries -- on
+// jdm-direct-motors it found only 78-80 of a source policy's 215 listings.
+// The Listing API's active-listing search caps one search at 50,000 results,
+// so scanStore reads the store in start-time slices below that; the
+// full-store scan (scanActiveListings) then sees every active listing.
 //
-// So on a large store, prefer sourcing both inputs from the seller's own UI
-// instead, which applies filters server-side and isn't subject to that cap:
-//   - the price-tier catalog as a small JSON file read from disk via
-//     --ranges-file (see loadRangesFile and data/policy-ranges/*.json for the
-//     format and an example, captured from the account's Business Policies
-//     page at bp/manage);
-//   - the source-policy item list from the Seller Hub "active listings
-//     filtered by shippingPolicy" page, scraped and passed via --items-file
-//     (itemId,price per line -- see readItemsFile).
-// Both flags are optional and independent -- omit either to fall back to
-// scanActiveListings' full-store scan for that input, which is fine on a
-// smaller store (under ~25,000 active listings) but should not be trusted
-// blindly above that.
-// GetItem/ReviseItem (Trading API) are still used to fetch each item's title
-// (and re-confirm it's still on the source policy) and to apply the moves --
-// those single-item calls aren't subject to the list-cap at all.
+// The two optional inputs still work and skip that scan:
+//   - --ranges-file: the price-tier catalog as a small JSON file (see
+//     loadRangesFile and data/policy-ranges/*.json, captured from the
+//     account's Business Policies page at bp/manage). Recommended anyway: a
+//     scan can't discover a catch-all tier like "MAX" (see below).
+//   - --items-file: the source-policy item list (itemId,price per line, e.g.
+//     scraped from the Seller Hub "active listings filtered by
+//     shippingPolicy" page -- see readItemsFile).
+// Each --items-file item is re-read (getListing) for its title and to confirm
+// it's still on a source policy; moves are applied with updateListing.
 
 /** Matches ONLY a clean "$<min> - $<max>" name -- excludes anything with a
  * suffix (e.g. "$200 - $225 Copy_(3)" or "$125 - $150 / 7836 / JP / ..."). */
@@ -444,7 +479,7 @@ function loadRangesFile(path: string): Map<string, PolicyRange> {
 
 /** Read a scraped "itemId,price" per line file (no header) -- see the
  * module-level NOTE above for where this comes from. Title is filled in
- * later via GetItem. */
+ * later via getListing. */
 function readItemsFile(path: string): Array<{ itemId: string; price: number }> {
   const text = readFileSync(path, "utf8").trim();
   return text
@@ -457,71 +492,64 @@ function readItemsFile(path: string): Array<{ itemId: string; price: number }> {
     });
 }
 
-const GET_MY_EBAY_SELLING_OUTPUT_SELECTOR = [
-  "ActiveList.PaginationResult.TotalNumberOfPages",
-  "ActiveList.ItemArray.Item.ItemID",
-  "ActiveList.ItemArray.Item.Title",
-  "ActiveList.ItemArray.Item.SellingStatus.CurrentPrice",
-  "ActiveList.ItemArray.Item.SellerProfiles.SellerShippingProfile.ShippingProfileID",
-  "ActiveList.ItemArray.Item.SellerProfiles.SellerShippingProfile.ShippingProfileName",
-].join(",");
-
-function getMyeBaySellingBody(pageNumber: number, entriesPerPage: number): string {
-  // Explicit, stable sort is required: GetMyeBaySelling's default order relates
-  // to TimeLeft, which keeps changing (GTC listings' countdowns), so items can
-  // drift between pages -- and get silently skipped -- across a scan that
-  // spans many sequential requests. ItemID is static, so sorting by it keeps
-  // page boundaries stable for the whole scan.
-  //
-  // NOTE: even with this fix, GetMyeBaySelling still hard-caps at 25,000
-  // entries -- see the module-level NOTE above. scanActiveListings() below is
-  // kept only as a fallback for smaller stores; migrate-by-price defaults to
-  // --items-file instead.
-  return `  <ActiveList>
-    <Include>true</Include>
-    <Sort>ItemIDAscending</Sort>
-    <Pagination>
-      <EntriesPerPage>${entriesPerPage}</EntriesPerPage>
-      <PageNumber>${pageNumber}</PageNumber>
-    </Pagination>
-  </ActiveList>`;
+interface ScannedListing {
+  itemId: string;
+  title: string;
+  price: number;
+  profileId: string;
+  profileName: string;
 }
 
-/** One page of active listings: total page count plus each item's price and
- * current shipping profile id/name. */
-async function fetchActiveListingsPage(
-  env: Env,
-  siteId: number,
-  pageNumber: number,
-  entriesPerPage: number
-): Promise<{
-  totalPages: number;
-  items: Array<{ itemId: string; title: string; price: number; profileId: string; profileName: string }>;
-}> {
-  const { xml, ok, ack, errors } = await callTradingApi(
-    env,
-    "GetMyeBaySelling",
-    getMyeBaySellingBody(pageNumber, entriesPerPage),
-    siteId,
-    { "X-EBAY-API-OUTPUT-SELECTOR": GET_MY_EBAY_SELLING_OUTPUT_SELECTOR }
-  );
+// A single search stops at MAX_SEARCH_RESULTS (50,000) listings, so the store
+// is cut into start-time slices small enough to page through completely.
+const SLICE_TARGET = 40_000;
+const SCAN_FROM = Date.parse("2000-01-01T00:00:00Z");
 
-  if (!ok) {
-    console.error(`GetMyeBaySelling page ${pageNumber}: Ack=${ack}`);
-    printErrors(errors);
-    process.exit(1);
+type TimeSlice = { from: string; to: string; count: number };
+
+/** Disjoint [from, to) start-time slices covering every active listing, each
+ * holding at most SLICE_TARGET of them (bisecting until they fit). */
+async function startTimeSlices(token: string, from: number, to: number, count?: number): Promise<{ slices: TimeSlice[]; total: number }> {
+  const range = { from: new Date(from).toISOString(), to: new Date(to).toISOString() };
+  const n = count ?? (await countActiveListings(token, { startAtRange: range }));
+  if (n === 0) return { slices: [], total: 0 };
+  if (n <= SLICE_TARGET || to - from < 60_000) {
+    if (n > MAX_SEARCH_RESULTS) console.log(`WARNING: ${n} listings started within one minute; only ${MAX_SEARCH_RESULTS} can be read.`);
+    return { slices: [{ ...range, count: n }], total: n };
   }
+  const mid = Math.floor((from + to) / 2);
+  const left = await startTimeSlices(token, from, mid);
+  const right = await startTimeSlices(token, mid, to, n - left.total);
+  return { slices: [...left.slices, ...right.slices], total: left.total + right.total };
+}
 
-  const totalPages = parseInt(findText(xml, "TotalNumberOfPages") ?? "1", 10);
-  const items = findBlocks(xml, "Item").map((block) => ({
-    itemId: findText(block, "ItemID") ?? "",
-    title: findText(block, "Title") ?? "",
-    price: parseFloat(findText(block, "CurrentPrice") ?? "NaN"),
-    profileId: findText(block, "ShippingProfileID") ?? "",
-    profileName: (findText(block, "ShippingProfileName") ?? "").trim(),
-  }));
+/** Every active listing once (Listing API search, by start-time slice, LISTING_ID
+ * order within each), with its price and current shipping policy id/name,
+ * printing progress per page of 200. */
+async function* scanStore(env: Env, progress: () => string): AsyncGenerator<ScannedListing> {
+  const token = await listingApiToken(env);
+  const { slices, total } = await startTimeSlices(token, SCAN_FROM, Date.now() + 86_400_000);
+  const pages = Math.max(1, slices.reduce((sum, sl) => sum + Math.ceil(sl.count / 200), 0));
+  console.log(`  ${total} active listing(s), read in ${slices.length} start-time slice(s) of <= ${SLICE_TARGET}`);
 
-  return { totalPages, items };
+  const seenIds = new Set<string>();
+  let page = 0;
+  for (const slice of slices) {
+    const onPage = () => console.log(`  page ${++page}/${pages}, ${progress()}`);
+    const listings = searchActiveListings(token, { startAtRange: { from: slice.from, to: slice.to } }, onPage, { sort: { field: "LISTING_ID", order: "ASC" } });
+    for await (const l of listings) {
+      // Skip a listing seen before, should pages or slices ever overlap.
+      if (seenIds.has(l.listingId)) continue;
+      seenIds.add(l.listingId);
+      yield {
+        itemId: l.listingId,
+        title: l.title,
+        price: l.price,
+        profileId: l.shippingPolicyId,
+        profileName: await policyName(env, l.marketplace, l.shippingPolicyId),
+      };
+    }
+  }
 }
 
 const PAGE_DELAY_MS = 250;
@@ -534,49 +562,30 @@ const PAGE_DELAY_MS = 250;
  * source policy. */
 async function scanActiveListings(
   env: Env,
-  siteId: number,
   fromPolicyIds: Set<string>
 ): Promise<{ ranges: Map<string, PolicyRange>; sourceItems: SourceItem[] }> {
   const ranges = new Map<string, PolicyRange>();
   const sourceItemsById = new Map<string, SourceItem>();
-  const entriesPerPage = 200;
 
-  const recordPage = (items: Awaited<ReturnType<typeof fetchActiveListingsPage>>["items"]) => {
-    for (const item of items) {
-      const m = PRICE_RANGE_RE.exec(item.profileName);
-      if (m && !ranges.has(item.profileId)) {
-        ranges.set(item.profileId, {
-          policyId: item.profileId,
-          name: item.profileName,
-          min: parseFloat(m[1].replace(/,/g, "")),
-          max: parseFloat(m[2].replace(/,/g, "")),
-        });
-      }
-      // Keyed by itemId (not pushed to an array) so that if pagination ever
-      // overlaps -- the same item showing up on two pages -- it's only
-      // counted once instead of skewing the report.
-      if (fromPolicyIds.has(item.profileId)) {
-        sourceItemsById.set(item.itemId, {
-          itemId: item.itemId,
-          title: item.title,
-          price: item.price,
-          sourcePolicyId: item.profileId,
-          sourcePolicyName: item.profileName,
-        });
-      }
+  for await (const item of scanStore(env, () => `${sourceItemsById.size} source-policy item(s) so far`)) {
+    const m = PRICE_RANGE_RE.exec(item.profileName);
+    if (m && !ranges.has(item.profileId)) {
+      ranges.set(item.profileId, {
+        policyId: item.profileId,
+        name: item.profileName,
+        min: parseFloat(m[1].replace(/,/g, "")),
+        max: parseFloat(m[2].replace(/,/g, "")),
+      });
     }
-  };
-
-  const first = await fetchActiveListingsPage(env, siteId, 1, entriesPerPage);
-  const totalPages = first.totalPages;
-  recordPage(first.items);
-  console.log(`  page 1/${totalPages}, ${sourceItemsById.size} source-policy item(s) so far`);
-
-  for (let page = 2; page <= totalPages; page++) {
-    await sleep(PAGE_DELAY_MS);
-    const { items } = await fetchActiveListingsPage(env, siteId, page, entriesPerPage);
-    recordPage(items);
-    console.log(`  page ${page}/${totalPages}, ${sourceItemsById.size} source-policy item(s) so far`);
+    if (fromPolicyIds.has(item.profileId)) {
+      sourceItemsById.set(item.itemId, {
+        itemId: item.itemId,
+        title: item.title,
+        price: item.price,
+        sourcePolicyId: item.profileId,
+        sourcePolicyName: item.profileName,
+      });
+    }
   }
 
   // NOTE: a catch-all tier above the top "$min - $max" policy (e.g. a "MAX"
@@ -588,50 +597,28 @@ async function scanActiveListings(
   return { ranges, sourceItems: [...sourceItemsById.values()] };
 }
 
-/** Full-store scan (same source and 25,000-listing cap as scanActiveListings'
- * fallback path) that records EVERY distinct shipping profile id/name pair
- * seen, with how many scanned listings currently sit on it -- unlike
- * scanActiveListings, which only keeps names matching the clean price-range
- * pattern. Used by scan-policies to find a policy's id from its name (e.g. a
- * "Copy" decoy policy) without visiting the Business Policies page. */
-async function scanAllPolicies(
-  env: Env,
-  siteId: number
-): Promise<Map<string, { name: string; count: number }>> {
+/** Full-store scan (same as scanActiveListings) that records EVERY distinct
+ * shipping policy id/name pair seen, with how many active listings currently
+ * sit on it -- unlike scanActiveListings, which only keeps names matching the
+ * clean price-range pattern. Used by scan-policies to find a policy's id from
+ * its name (e.g. a "Copy" decoy policy) without visiting the Business
+ * Policies page. */
+async function scanAllPolicies(env: Env): Promise<Map<string, { name: string; count: number }>> {
   const seen = new Map<string, { name: string; count: number }>();
-  const entriesPerPage = 200;
-
-  const recordPage = (items: Awaited<ReturnType<typeof fetchActiveListingsPage>>["items"]) => {
-    for (const item of items) {
-      const existing = seen.get(item.profileId);
-      if (existing) {
-        existing.count++;
-      } else {
-        seen.set(item.profileId, { name: item.profileName, count: 1 });
-      }
+  for await (const item of scanStore(env, () => `${seen.size} distinct polic(y/ies) so far`)) {
+    const existing = seen.get(item.profileId);
+    if (existing) {
+      existing.count++;
+    } else {
+      seen.set(item.profileId, { name: item.profileName, count: 1 });
     }
-  };
-
-  const first = await fetchActiveListingsPage(env, siteId, 1, entriesPerPage);
-  const totalPages = first.totalPages;
-  recordPage(first.items);
-  console.log(`  page 1/${totalPages}, ${seen.size} distinct polic(y/ies) so far`);
-
-  for (let page = 2; page <= totalPages; page++) {
-    await sleep(PAGE_DELAY_MS);
-    const { items } = await fetchActiveListingsPage(env, siteId, page, entriesPerPage);
-    recordPage(items);
-    console.log(`  page ${page}/${totalPages}, ${seen.size} distinct polic(y/ies) so far`);
   }
-
   return seen;
 }
 
-async function scanPolicies(env: Env, siteId: number, nameContains: string | undefined) {
+async function scanPolicies(env: Env, nameContains: string | undefined) {
   console.log(`Scanning all active listings for distinct shipping policies... (this can take a few minutes)`);
-  console.log(`WARNING: this scan is capped at 25,000 active listings by GetMyeBaySelling and may miss a policy`);
-  console.log(`that only appears on listings beyond the cap on a larger store.`);
-  const seen = await scanAllPolicies(env, siteId);
+  const seen = await scanAllPolicies(env);
 
   const needle = nameContains?.toLowerCase();
   const rows = [...seen.entries()]
@@ -721,7 +708,7 @@ function printRangeCatalog(ranges: Map<string, PolicyRange>) {
   }
 }
 
-/** Fetch an item's title and current shipping profile id/name via GetItem,
+/** Fetch an item's title and current shipping profile id/name via getListing,
  * without the console logging getItem() does (used for the bulk items-file
  * path, which would otherwise print 215 lines of noise). Also serves as a
  * re-confirmation that the item is still on one of the source policies at
@@ -729,23 +716,24 @@ function printRangeCatalog(ranges: Map<string, PolicyRange>) {
  * scraped and when this runs. */
 async function fetchItemDetails(
   env: Env,
-  itemId: string,
-  siteId: number
+  itemId: string
 ): Promise<{ title: string; profileId: string; profileName: string } | null> {
-  const { xml, ok, ack, errors } = await callTradingApi(env, "GetItem", getItemBody(itemId), siteId);
-  if (!ok) {
+  let listing;
+  try {
+    listing = await getListing(await listingApiToken(env), itemId);
+  } catch {
     return null;
   }
+  if (!listing) return null;
   return {
-    title: findText(xml, "Title") ?? "",
-    profileId: findText(xml, "ShippingProfileID") ?? "",
-    profileName: findText(xml, "ShippingProfileName") ?? "",
+    title: listing.title,
+    profileId: listing.shippingPolicyId,
+    profileName: await policyName(env, listing.marketplace, listing.shippingPolicyId),
   };
 }
 
 async function migrateByPrice(
   env: Env,
-  siteId: number,
   fromPolicyIds: string[],
   reportOut: string,
   apply: boolean,
@@ -758,16 +746,14 @@ async function migrateByPrice(
     let sourceItems: SourceItem[] | undefined;
 
     if (itemsFile) {
-      // Preferred path -- see the module-level NOTE above scanActiveListings:
-      // the item list comes from a UI scrape (Seller Hub filtered by
-      // shippingPolicy), not a full-store API scan, since the latter is
-      // capped at 25,000 entries and misses items on large stores.
+      // The item list comes from a UI scrape (Seller Hub filtered by
+      // shippingPolicy) -- quicker than a full-store scan on a big store.
       const raw = readItemsFile(itemsFile);
       console.log(`Fetching title + current policy for ${raw.length} item(s) from ${itemsFile}...`);
       sourceItems = [];
       let stale = 0;
       for (let i = 0; i < raw.length; i++) {
-        const details = await fetchItemDetails(env, raw[i].itemId, siteId);
+        const details = await fetchItemDetails(env, raw[i].itemId);
         if (!details) {
           console.log(`  WARNING: could not read item ${raw[i].itemId} (skipped)`);
           continue;
@@ -796,9 +782,7 @@ async function migrateByPrice(
 
     if (!ranges || !sourceItems) {
       console.log(`Scanning all active listings for ${fromPolicyIds.length} source polic(y/ies)... (this can take a few minutes)`);
-      console.log(`WARNING: this scan is capped at 25,000 active listings by GetMyeBaySelling and may undercount`);
-      console.log(`on a larger store -- prefer --ranges-file/--items-file with UI-sourced data when possible.`);
-      const scanned = await scanActiveListings(env, siteId, fromPolicyIdSet);
+      const scanned = await scanActiveListings(env, fromPolicyIdSet);
       ranges = ranges ?? scanned.ranges;
       sourceItems = sourceItems ?? scanned.sourceItems;
     }
@@ -835,7 +819,7 @@ async function migrateByPrice(
 
   const failed: string[] = [];
   for (const row of rows) {
-    const ok = await reviseItem(env, row.itemId, row.targetPolicyId, siteId, false);
+    const ok = await reviseItem(env, row.itemId, row.targetPolicyId, false);
     if (!ok) failed.push(row.itemId);
     await sleep(PAGE_DELAY_MS);
   }
@@ -855,7 +839,6 @@ interface ParsedArgs {
   marketplace: string;
   itemIds: string[];
   policyId?: string;
-  siteId: number;
   dryRun: boolean;
   fromPolicyIds: string[];
   reportOut?: string;
@@ -874,7 +857,6 @@ function parseArgs(argv: string[]): ParsedArgs {
     marketplace: "EBAY_US",
     itemIds: [],
     policyId: undefined,
-    siteId: 0,
     dryRun: false,
     fromPolicyIds: [],
     reportOut: undefined,
@@ -928,7 +910,7 @@ function parseArgs(argv: string[]): ParsedArgs {
         args.policyId = rest[++i];
         break;
       case "--site-id":
-        args.siteId = parseInt(rest[++i], 10);
+        i++; // ignored: listing updates use each listing's own marketplace
         break;
       case "--dry-run":
         args.dryRun = true;
@@ -994,15 +976,16 @@ async function main() {
   if (!argv.includes("--sandbox")) ({ account, rest } = accountFromArgs(argv));
   const args = parseArgs(rest);
   const env: Env = args.sandbox ? "sandbox" : "prod";
+  useGraphqlSandbox(env === "sandbox");
 
   if (args.command === "list-policies") {
     await listPolicies(env, args.marketplace);
   } else if (args.command === "check-access") {
-    await checkAccess(env, args.itemIds, args.policyId, args.siteId);
+    await checkAccess(env, args.itemIds, args.policyId);
   } else if (args.command === "revise-items") {
     const results: Array<[string, boolean]> = [];
     for (const itemId of args.itemIds) {
-      const ok = await reviseItem(env, itemId, args.policyId!, args.siteId, args.dryRun);
+      const ok = await reviseItem(env, itemId, args.policyId!, args.dryRun);
       results.push([itemId, ok]);
     }
     if (!args.dryRun) {
@@ -1014,9 +997,9 @@ async function main() {
       console.log(`\nAll ${results.length} item(s) revised successfully.`);
     }
   } else if (args.command === "migrate-by-price") {
-    await migrateByPrice(env, args.siteId, args.fromPolicyIds, args.reportOut!, args.apply, args.itemsFile, args.rangesFile);
+    await migrateByPrice(env, args.fromPolicyIds, args.reportOut!, args.apply, args.itemsFile, args.rangesFile);
   } else if (args.command === "scan-policies") {
-    await scanPolicies(env, args.siteId, args.nameContains);
+    await scanPolicies(env, args.nameContains);
   } else if (args.command === "swap-rate-table") {
     await swapRateTable(env, args.marketplace, args.fromRateTableId!, args.toRateTableId!, args.dryRun);
   }

@@ -6,42 +6,38 @@
  *
  * This is the Negotiation API's findEligibleItems call:
  *   GET https://api.ebay.com/sell/negotiation/v1/find_eligible_items
- * It returns listing IDs only, so each one is optionally enriched with title /
- * price / watch count via the Trading API's GetItem (skip with --no-details).
+ * It returns listing IDs only, so they are enriched with title / price /
+ * quantity / SKU through the GraphQL Listing API's active-listing search
+ * (src/lib/listing_api.ts, 100 IDs per call; skip with --no-details).
  *
- * TOKENS -- two different ones, because these are two different APIs; both
- * come from src/auth/ebay_auth.ts for the --account given:
- *   findEligibleItems    OAuth user token with scope sell.inventory (REST;
- *                        an Auth'n'Auth token gets 403 "Insufficient
- *                        permissions" here). Refreshed automatically; the
- *                        account needs an OAuth sign-in (src/auth/ebay_login.ts).
- *   GetItem / GetSellerList  the account's Auth'n'Auth token (Trading API).
+ * WATCH COUNTS are not shown any more: the Modernized APIs don't return a
+ * listing's watch count (the Listing API can only sort by it, and the Browse
+ * API doesn't have it). So rows come in the order eBay's findEligibleItems
+ * returns them, and the old --source watchers mode (GetSellerList watch-count
+ * scan) is gone -- src/legacy/listings/find_eligible_offer_items.ts still has
+ * both, on the Trading API.
+ *
+ * TOKENS -- both OAuth user tokens from src/auth/ebay_auth.ts for --account,
+ * refreshed automatically (the account needs an OAuth sign-in,
+ * src/auth/ebay_login.ts):
+ *   findEligibleItems   scope sell.inventory (the Negotiation API has no
+ *                       scope of its own)
+ *   listing details     scope sell.listing
  *
  * Usage:
  *   npx tsx src/listings/find_eligible_offer_items.ts --account <name> [options]
  *
  * Options:
- *   --source WHICH     'negotiation' (default, authoritative) or 'watchers'
- *                      -- see below
- *   --marketplace ID   eBay marketplace (default EBAY_US)
- *   --site N           Trading API site id for enrichment (default 0 = US)
- *   --no-details       listing IDs only, no GetItem enrichment (fast)
+ *   --marketplace ID   eBay marketplace for findEligibleItems (default EBAY_US)
+ *   --no-details       listing IDs only, no Listing API enrichment (fast)
  *   --csv PATH         also write a CSV (default reports/<account>-eligible-offer-items.csv)
+ *   --no-csv           don't write the CSV
  *   --json PATH        also write the raw joined data as JSON
  *   --max N            stop after N eligible listings (for a quick look)
- *   --concurrency N    GetSellerList pages fetched in parallel (default 6)
- *   --days N           GetSellerList end-time window for --source watchers
- *                      (default 40; GTC listings renew every 30 days, so 40
- *                      covers the whole store)
  *
- * --source watchers is a stand-in that needs only the Trading API token we
- * already have: it pages GetSellerList over the whole store and keeps active
- * GTC listings that have >= 1 watcher and stock available. Watchers are the
- * same "interested buyer" signal eBay uses, so the list is close, but it is an
- * approximation: it cannot see abandoned-cart buyers, and it does not know
- * about eBay's other exclusions (multi-variation listings, listings that
- * already have an offer out, Inventory-API-managed listings). Use
- * --source negotiation once a sell.inventory token exists.
+ * CSV columns: ListingID, Title, Price, Currency, QuantityAvailable,
+ * ListingType (FixedPriceItem / Chinese), Site (the listing's marketplace,
+ * e.g. EBAY_US, EBAY_MOTORS_US, EBAY_AU), BestOfferEnabled, SKU, URL.
  *
  * Read-only: it sends no offers. Sending is a separate call
  * (sendOfferToInterestedBuyers) and is deliberately not implemented here.
@@ -49,28 +45,23 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { findBlocks, findText } from "../lib/xml_util.ts";
-import { accountFromArgs, authnAuthToken, die, oauthToken } from "../auth/ebay_auth.ts";
+import { accountFromArgs, die, oauthToken } from "../auth/ebay_auth.ts";
 import { csvCell } from "../lib/csv.ts";
-import { tradingCall, unescapeXml } from "../lib/trading_api.ts";
-import { DAY_MS, runMain, sleep } from "../lib/util.ts";
+import { listingToken, MAX_SEARCH_LISTING_IDS, searchActiveListings, type ListingInfo } from "../lib/listing_api.ts";
+import { runMain, sleep } from "../lib/util.ts";
 
 const NEGOTIATION_BASE = "https://api.ebay.com/sell/negotiation/v1";
 const PAGE_LIMIT = 200; // findEligibleItems max page size
-const DETAIL_DELAY_MS = 120; // be gentle: one GetItem per eligible listing
+const DETAIL_DELAY_MS = 120; // be gentle between API pages
 // The Negotiation API has no scope of its own; it takes sell.inventory.
 const NEGOTIATION_SCOPE = "sell.inventory";
 
 interface Options {
-  source: "negotiation" | "watchers";
   marketplace: string;
-  siteId: number;
   details: boolean;
   csvPath: string | undefined;
   jsonPath: string | undefined;
   max: number | undefined;
-  days: number;
-  concurrency: number;
 }
 
 interface ItemDetail {
@@ -79,7 +70,6 @@ interface ItemDetail {
   price: number;
   currency: string;
   quantityAvailable: number;
-  watchCount: number;
   listingType: string;
   site: string;
   bestOfferEnabled: boolean;
@@ -95,7 +85,6 @@ function blankItem(listingId: string): ItemDetail {
     price: NaN,
     currency: "",
     quantityAvailable: NaN,
-    watchCount: NaN,
     listingType: "",
     site: "",
     bestOfferEnabled: false,
@@ -106,15 +95,11 @@ function blankItem(listingId: string): ItemDetail {
 
 function parseArgs(account: string, argv: string[]): Options {
   const opts: Options = {
-    source: "negotiation",
     marketplace: "EBAY_US",
-    siteId: 0,
     details: true,
     csvPath: `reports/${account}-eligible-offer-items.csv`,
     jsonPath: undefined,
     max: undefined,
-    days: 40,
-    concurrency: 6,
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -127,19 +112,18 @@ function parseArgs(account: string, argv: string[]): Options {
       return v;
     };
     switch (arg) {
-      case "--source": {
-        const v = next();
-        if (v !== "negotiation" && v !== "watchers") {
-          die("ERROR: --source must be 'negotiation' or 'watchers'");
-        }
-        opts.source = v;
-        break;
-      }
+      case "--source":
+        if (next() === "negotiation") break; // the only source left
+      // falls through
+      case "--site":
+      case "--days":
+      case "--concurrency":
+        die(
+          `ERROR: ${arg} was for the Trading API watch-count scan, which the Modernized APIs can't do ` +
+            "(no watch counts). Use src/legacy/listings/find_eligible_offer_items.ts for it."
+        );
       case "--marketplace":
         opts.marketplace = next();
-        break;
-      case "--site":
-        opts.siteId = parseInt(next(), 10);
         break;
       case "--no-details":
         opts.details = false;
@@ -155,12 +139,6 @@ function parseArgs(account: string, argv: string[]): Options {
         break;
       case "--max":
         opts.max = parseInt(next(), 10);
-        break;
-      case "--days":
-        opts.days = parseInt(next(), 10);
-        break;
-      case "--concurrency":
-        opts.concurrency = Math.max(1, parseInt(next(), 10));
         break;
       case "-h":
       case "--help":
@@ -230,187 +208,52 @@ async function fetchAllEligible(token: string, opts: Options): Promise<string[]>
   }
 }
 
-/** Title / price / watchers for one listing, via Trading GetItem. */
-async function fetchItemDetail(
-  token: string,
-  siteId: number,
-  listingId: string
-): Promise<ItemDetail> {
-  const r = await tradingCall(
-    token,
-    "GetItem",
-    `  <ItemID>${listingId}</ItemID>
-  <IncludeWatchCount>true</IncludeWatchCount>
-  <DetailLevel>ReturnAll</DetailLevel>`,
-    { siteId }
-  );
-  const blank = blankItem(listingId);
-  if (!r.ok) {
-    for (const err of r.errors) console.error(`  GetItem ${listingId}: ${err.severity}: ${err.short}`);
-    return blank;
-  }
-  const xml = r.xml;
+/** Trading-style ListingType names, so the CSV keeps its old values. */
+const LISTING_TYPE: Record<string, string> = { FIXED_PRICE: "FixedPriceItem", AUCTION: "Chinese" };
 
-  const priceMatch = xml.match(
-    /<(?:\w+:)?CurrentPrice[^>]*currencyID="([^"]*)"[^>]*>([\s\S]*?)<\/(?:\w+:)?CurrentPrice>/
-  );
-
+function toItemDetail(l: ListingInfo): ItemDetail {
   return {
-    listingId,
-    title: unescapeXml((findText(xml, "Title") ?? "").trim()),
-    price: parseFloat(priceMatch?.[2] ?? findText(xml, "CurrentPrice") ?? "NaN"),
-    currency: priceMatch?.[1] ?? "",
-    quantityAvailable: parseInt(findText(xml, "Quantity") ?? "NaN", 10),
-    watchCount: parseInt(findText(xml, "WatchCount") ?? "NaN", 10),
-    listingType: findText(xml, "ListingType") ?? "",
-    site: findText(xml, "Site") ?? "",
-    bestOfferEnabled: (findText(xml, "BestOfferEnabled") ?? "").toLowerCase() === "true",
-    sku: findText(xml, "SKU") ?? "",
-    viewUrl: findText(xml, "ViewItemURL") ?? blank.viewUrl,
+    listingId: l.listingId,
+    title: l.title,
+    price: l.price,
+    currency: l.currency,
+    quantityAvailable: l.quantityAvailable,
+    listingType: LISTING_TYPE[l.listingFormat] ?? l.listingFormat,
+    site: l.marketplace,
+    bestOfferEnabled: l.acceptBestOffer,
+    sku: l.sku,
+    viewUrl: `https://www.ebay.com/itm/${l.listingId}`,
   };
 }
 
-const SELLER_LIST_PAGE_SIZE = 200; // GetSellerList max entries per page
-const SELLER_LIST_DELAY_MS = 200;
-
-/** Parse one GetSellerList page into the watched-listing rows it contains. */
-function parseSellerListPage(xml: string): { rows: ItemDetail[]; items: number } {
-  const rows: ItemDetail[] = [];
-  const blocks = findBlocks(xml, "Item");
-
-  for (const block of blocks) {
-    const watchCount = parseInt(findText(block, "WatchCount") ?? "0", 10) || 0;
-    if (watchCount === 0) continue;
-
-    // Coarse granularity omits ListingType; GTC is fixed-price only (auctions
-    // cannot run as GTC), so it stands in for the fixed-price filter.
-    if ((findText(block, "ListingDuration") ?? "") !== "GTC") continue;
-
-    const quantity = parseInt(findText(block, "Quantity") ?? "NaN", 10);
-    const sold = parseInt(findText(block, "QuantitySold") ?? "0", 10) || 0;
-    const available = Number.isFinite(quantity) ? quantity - sold : NaN;
-    if (Number.isFinite(available) && available <= 0) continue;
-
-    const priceMatch = block.match(
-      /<(?:\w+:)?CurrentPrice[^>]*currencyID="([^"]*)"[^>]*>([\s\S]*?)<\/(?:\w+:)?CurrentPrice>/
-    );
-    const listingId = findText(block, "ItemID") ?? "";
-
-    rows.push({
-      listingId,
-      title: unescapeXml((findText(block, "Title") ?? "").trim()),
-      price: parseFloat(priceMatch?.[2] ?? "NaN"),
-      currency: priceMatch?.[1] ?? "",
-      quantityAvailable: available,
-      watchCount,
-      listingType: "FixedPriceItem", // implied by GTC, see above
-      site: findText(block, "Site") ?? "",
-      bestOfferEnabled: false, // not returned by this call
-      sku: findText(block, "SKU") ?? "",
-      viewUrl: findText(block, "ViewItemURL") ?? `https://www.ebay.com/itm/${listingId}`,
-    });
-  }
-
-  return { rows, items: blocks.length };
-}
-
-/** One GetSellerList page of the seller's active listings, with watch counts. */
-async function fetchSellerListPage(
-  token: string,
-  opts: Options,
-  from: Date,
-  to: Date,
-  pageNumber: number
-): Promise<{ xml: string; total: number }> {
-  const r = await tradingCall(
-    token,
-    "GetSellerList",
-    `  <EndTimeFrom>${from.toISOString()}</EndTimeFrom>
-  <EndTimeTo>${to.toISOString()}</EndTimeTo>
-  <IncludeWatchCount>true</IncludeWatchCount>
-  <GranularityLevel>Coarse</GranularityLevel>
-  <Pagination>
-    <EntriesPerPage>${SELLER_LIST_PAGE_SIZE}</EntriesPerPage>
-    <PageNumber>${pageNumber}</PageNumber>
-  </Pagination>`,
-    { siteId: opts.siteId }
-  );
-  const xml = r.xml;
-  if (!r.ok) {
-    console.error(`GetSellerList page ${pageNumber}: Ack=${r.ack}`);
-    for (const err of r.errors) console.error(`  ${err.severity}: ${err.short} -- ${err.long}`);
-    process.exit(1);
-  }
-
-  return { xml, total: parseInt(findText(xml, "TotalNumberOfEntries") ?? "0", 10) || 0 };
-}
-
 /**
- * Trading-API stand-in for findEligibleItems: every active listing with at
- * least one watcher, via GetSellerList paged over the listings whose end time
- * falls in the next `days` days (GTC listings renew every 30, so a 40-day
- * window covers the whole store).
- *
- * GetSellerList rather than GetMyeBaySelling on purpose: GetMyeBaySelling's
- * ActiveList silently caps at 25,000 entries and applies its sort *within* that
- * cap, so on this store (~96k active listings) a watch-count-descending scan
- * sees only a quarter of the listings and undercounts by about the same factor.
- * GetSellerList has no such cap, at the cost of paging the whole store -- ~480
- * calls of ~750KB each, which is why pages are fetched --concurrency at a time.
+ * Title / price / quantity for each listing via the Listing API's active
+ * listing search, MAX_SEARCH_LISTING_IDS ids per call. Rows keep the order of
+ * `listingIds`; a listing eBay doesn't return (e.g. ended since) stays blank.
  */
-async function scanWatchedListings(
-  token: string,
-  opts: Options
-): Promise<{ rows: ItemDetail[]; scanned: number; total: number }> {
-  const from = new Date();
-  const to = new Date(from.getTime() + opts.days * DAY_MS);
-
-  const first = await fetchSellerListPage(token, opts, from, to, 1);
-  const total = first.total;
-  const totalPages = Math.max(1, Math.ceil(total / SELLER_LIST_PAGE_SIZE));
-  console.error(
-    `${total} active listing(s) ending within ${opts.days} days; ` +
-      `${totalPages} page(s) of ${SELLER_LIST_PAGE_SIZE}, ${opts.concurrency} at a time`
-  );
-
-  const firstPage = parseSellerListPage(first.xml);
-  const rows: ItemDetail[] = [...firstPage.rows];
-  let scanned = firstPage.items;
-
-  for (let page = 2; page <= totalPages; page += opts.concurrency) {
-    const batch = [];
-    for (let i = 0; i < opts.concurrency && page + i <= totalPages; i++) {
-      batch.push(fetchSellerListPage(token, opts, from, to, page + i));
-    }
-    for (const settled of await Promise.all(batch)) {
-      const parsed = parseSellerListPage(settled.xml);
-      rows.push(...parsed.rows);
-      scanned += parsed.items;
-    }
-
-    if (opts.max !== undefined && rows.length >= opts.max) {
-      return { rows: rows.slice(0, opts.max), scanned, total };
-    }
-    const done = Math.min(page + opts.concurrency - 1, totalPages);
-    if (done % 50 < opts.concurrency) {
-      console.error(`  page ${done}/${totalPages}: ${scanned} scanned, ${rows.length} watched so far`);
-    }
-    await sleep(SELLER_LIST_DELAY_MS);
+async function fetchItemDetails(token: string, listingIds: string[]): Promise<ItemDetail[]> {
+  const found = new Map<string, ItemDetail>();
+  for (let i = 0; i < listingIds.length; i += MAX_SEARCH_LISTING_IDS) {
+    const batch = listingIds.slice(i, i + MAX_SEARCH_LISTING_IDS);
+    for await (const l of searchActiveListings(token, { listingIds: batch })) found.set(l.listingId, toItemDetail(l));
+    const done = Math.min(i + MAX_SEARCH_LISTING_IDS, listingIds.length);
+    if (done % 500 === 0 || done === listingIds.length) console.error(`  ${done}/${listingIds.length}`);
+    await sleep(DETAIL_DELAY_MS);
   }
-
-  rows.sort((a, b) => b.watchCount - a.watchCount);
-  return { rows, scanned, total };
+  const missing = listingIds.filter((id) => !found.has(id));
+  if (missing.length) console.error(`  ${missing.length} listing(s) not returned as active (details left blank): ${missing.slice(0, 10).join(" ")}${missing.length > 10 ? " ..." : ""}`);
+  return listingIds.map((id) => found.get(id) ?? blankItem(id));
 }
 
-function writeCsv(path: string, rows: ItemDetail[], details: boolean, bestOffer: boolean): void {
+function writeCsv(path: string, rows: ItemDetail[], details: boolean): void {
   mkdirSync(dirname(path), { recursive: true });
   const header = details
-    ? ["ListingID", "Title", "Price", "Currency", "WatchCount", "QuantityAvailable", "ListingType", "Site", ...(bestOffer ? ["BestOfferEnabled"] : []), "SKU", "URL"]
+    ? ["ListingID", "Title", "Price", "Currency", "QuantityAvailable", "ListingType", "Site", "BestOfferEnabled", "SKU", "URL"]
     : ["ListingID", "URL"];
   const lines = [header.join(",")];
   for (const r of rows) {
     const cells: Array<string | number | boolean> = details
-      ? [r.listingId, r.title, r.price, r.currency, r.watchCount, r.quantityAvailable, r.listingType, r.site, ...(bestOffer ? [r.bestOfferEnabled] : []), r.sku, r.viewUrl]
+      ? [r.listingId, r.title, r.price, r.currency, r.quantityAvailable, r.listingType, r.site, r.bestOfferEnabled, r.sku, r.viewUrl]
       : [r.listingId, r.viewUrl];
     lines.push(cells.map(csvCell).join(","));
   }
@@ -421,57 +264,30 @@ function writeCsv(path: string, rows: ItemDetail[], details: boolean, bestOffer:
 async function main() {
   const { account, rest } = accountFromArgs(process.argv.slice(2));
   const opts = parseArgs(account, rest);
-  const tradingToken = authnAuthToken(account);
 
-  let rows: ItemDetail[];
-
-  if (opts.source === "watchers") {
-    const scan = await scanWatchedListings(tradingToken, opts);
-    rows = scan.rows;
-    console.error(`scanned ${scan.scanned} of ${scan.total} active listing(s)`);
-    if (rows.length === 0) {
-      console.log("No active fixed-price listing currently has a watcher.");
-      return;
-    }
-  } else {
-    const listingIds = await fetchAllEligible(await oauthToken(account, [NEGOTIATION_SCOPE]), opts);
-    if (listingIds.length === 0) {
-      console.log("No listings currently have an interested buyer to send an offer to.");
-      return;
-    }
-
-    rows = listingIds.map(blankItem);
-
-    if (opts.details) {
-      console.error(`fetching details for ${listingIds.length} listing(s)...`);
-      const detailed: ItemDetail[] = [];
-      for (const [i, listingId] of listingIds.entries()) {
-        detailed.push(await fetchItemDetail(tradingToken, opts.siteId, listingId));
-        if ((i + 1) % 25 === 0) console.error(`  ${i + 1}/${listingIds.length}`);
-        await sleep(DETAIL_DELAY_MS);
-      }
-      rows = detailed;
-      rows.sort((a, b) => (b.watchCount || 0) - (a.watchCount || 0));
-    }
+  const listingIds = await fetchAllEligible(await oauthToken(account, [NEGOTIATION_SCOPE]), opts);
+  if (listingIds.length === 0) {
+    console.log("No listings currently have an interested buyer to send an offer to.");
+    return;
   }
 
-  const detailed = opts.details || opts.source === "watchers";
+  let rows = listingIds.map(blankItem);
+  if (opts.details) {
+    console.error(`fetching details for ${listingIds.length} listing(s)...`);
+    rows = await fetchItemDetails(await listingToken(account), listingIds);
+  }
+
   for (const r of rows) {
-    if (detailed) {
+    if (opts.details) {
       const price = Number.isNaN(r.price) ? "?" : `${r.currency} ${r.price.toFixed(2)}`;
-      const watchers = Number.isNaN(r.watchCount) ? "?" : String(r.watchCount);
-      console.log(`${r.listingId}  ${watchers.padStart(4)} watchers  ${price.padStart(12)}  ${r.title}`);
+      console.log(`${r.listingId}  ${price.padStart(12)}  ${r.title}`);
     } else {
       console.log(r.listingId);
     }
   }
-  console.log(
-    opts.source === "watchers"
-      ? `\n${rows.length} active fixed-price listing(s) with at least one watcher (approximation -- see --source negotiation).`
-      : `\n${rows.length} listing(s) eligible for offers to interested buyers.`
-  );
+  console.log(`\n${rows.length} listing(s) eligible for offers to interested buyers.`);
 
-  if (opts.csvPath) writeCsv(opts.csvPath, rows, detailed, opts.source !== "watchers");
+  if (opts.csvPath) writeCsv(opts.csvPath, rows, opts.details);
   if (opts.jsonPath) {
     mkdirSync(dirname(opts.jsonPath), { recursive: true });
     writeFileSync(opts.jsonPath, JSON.stringify(rows, null, 2) + "\n");

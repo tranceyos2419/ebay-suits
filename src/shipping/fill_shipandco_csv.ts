@@ -32,7 +32,8 @@
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
-import { accountFromArgs, authnAuthToken, die } from "../auth/ebay_auth.ts";
+import { accountFromArgs, die } from "../auth/ebay_auth.ts";
+import { fulfillmentToken } from "../lib/fulfillment_api.ts";
 import { parseCsv, toCsv } from "../lib/csv.ts";
 import { adjustmentsFromArgs, describeResult, loadReviewedNames, uploadEbayOrder } from "../lib/ebay_to_shipandco.ts";
 import { listApiOrders, type OrderAdjustments } from "../lib/shipandco_orders.ts";
@@ -96,7 +97,7 @@ async function main() {
   const uploadedCol = column(rows, UPLOADED_COL);
   for (const r of rows) while (r.length < rows[0].length) r.push("");
 
-  const token = authnAuthToken(opts.account);
+  const token = await fulfillmentToken(opts.account);
   const existing = await listApiOrders();
   const counts: Record<string, number> = {};
   let done = 0;
