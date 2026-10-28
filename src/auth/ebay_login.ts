@@ -8,7 +8,7 @@
  *
  * Usage (run it in your own terminal -- it waits for you to paste):
  *   npx tsx src/auth/ebay_login.ts --account love-of-japan
- *   npx tsx src/auth/ebay_login.ts --account love-of-japan --scopes sell.account sell.negotiation
+ *   npx tsx src/auth/ebay_login.ts --account love-of-japan --scopes sell.account sell.inventory
  *
  *   1. It prints an eBay sign-in link. Open it and sign in AS THAT SELLER
  *      (prompt=login forces a fresh sign-in, so whoever is already signed in
@@ -21,7 +21,7 @@
  *
  * Non-interactive: pass the pasted address/code with --code '<...>'.
  *
- * Needs "app" { clientId, clientSecret, ruName } in credentials.json, and the
+ * Needs EBAY_APP_CLIENT_ID, EBAY_APP_CLIENT_SECRET and EBAY_APP_RU_NAME in .env, and the
  * RuName must have OAuth enabled (developer.ebay.com -> User Tokens ->
  * "Your eBay Sign-in Settings").
  */
@@ -47,7 +47,20 @@ const AUTHORIZE_URL = "https://auth.ebay.com/oauth2/authorize";
 // Asked for once at sign-in, so a script using another of these APIs later
 // doesn't need a new sign-in. api_scope is the base scope; the Trading API
 // (GetUser, for the identity check below) accepts a token carrying it.
-const DEFAULT_SCOPES = ["api_scope", "sell.account", "sell.inventory", "sell.negotiation", "sell.fulfillment"];
+// sell.listing / sell.order / sell.return / commerce.message are the
+// Modernized APIs that replace Trading and Post-Order (src/lib/graphql_api.ts).
+const DEFAULT_SCOPES = [
+  "api_scope",
+  "sell.account",
+  "sell.inventory",
+  "sell.fulfillment",
+  "sell.finances",
+  "sell.listing",
+  "sell.order",
+  "sell.return",
+  "commerce.message",
+  "commerce.identity.readonly",
+];
 
 function parseArgs(argv: string[]): { account: string; scopes: string[]; code?: string } {
   const { account, rest } = accountFromArgs(argv);
@@ -87,7 +100,7 @@ function extractCode(input: string): { code: string; state?: string } {
 async function main() {
   const { account, scopes, code: codeArg } = parseArgs(process.argv.slice(2));
   const app = loadCredentials().app;
-  if (!app?.ruName) die('ERROR: credentials.json has no "app".ruName (the app\'s RuName / redirect_uri).');
+  if (!app?.ruName) die("ERROR: .env has no EBAY_APP_RU_NAME (the app's RuName / redirect_uri).");
 
   let pasted = codeArg;
   const state = randomBytes(12).toString("hex");

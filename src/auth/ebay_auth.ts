@@ -1,7 +1,7 @@
 #!/usr/bin/env -S npx tsx
 /**
- * ebay_auth.ts -- the one place that reads credentials.json and hands out
- * eBay tokens for a named seller account (e.g. jdm-direct-motors,
+ * ebay_auth.ts -- the one place that reads the eBay credentials in `.env`
+ * and hands out eBay tokens for a named seller account (e.g. jdm-direct-motors,
  * love-of-japan). Every script that talks to eBay takes `--account <name>`
  * and gets its token from here, so the account is always explicit on the
  * command line -- never inherited from an exported shell variable.
@@ -16,18 +16,17 @@
  *     refresh token and saves it back. The refresh token itself comes from
  *     src/auth/ebay_login.ts.
  *
- * credentials.json (project root, chmod 600, gitignored):
- *   {
- *     "app": { "clientId", "clientSecret", "ruName" },
- *     "accounts": {
- *       "<name>": {
- *         "ebayUserId": "...",                     // recorded by `whoami`
- *         "authnauth": { "token", "expiresAt" },
- *         "oauth": { "refreshToken", "refreshTokenExpiresAt", "scopes",
- *                    "accessToken", "accessTokenExpiresAt", "accessTokenScopes" }
- *       }
- *     }
- *   }
+ * .env (project root, chmod 600, gitignored -- see src/lib/env_file.ts), the
+ * only place secrets are kept. <ACCOUNT> is the account name upper-cased with
+ * "-" as "_" (jdm-direct-motors -> JDM_DIRECT_MOTORS):
+ *   EBAY_APP_CLIENT_ID, EBAY_APP_CLIENT_SECRET, EBAY_APP_RU_NAME
+ *   EBAY_ACCOUNTS                         comma-separated account names
+ *   EBAY_<ACCOUNT>_USER_ID                recorded by `whoami`
+ *   EBAY_<ACCOUNT>_AUTHNAUTH_TOKEN, _AUTHNAUTH_EXPIRES_AT
+ *   EBAY_<ACCOUNT>_OAUTH_REFRESH_TOKEN, _OAUTH_REFRESH_TOKEN_EXPIRES_AT,
+ *     _OAUTH_SCOPES, _OAUTH_SIGNED_IN_AT, _OAUTH_ACCESS_TOKEN,
+ *     _OAUTH_ACCESS_TOKEN_EXPIRES_AT, _OAUTH_ACCESS_TOKEN_SCOPES
+ *   (scope lists are space-separated full scope URLs)
  *
  * CLI:
  *   npx tsx src/auth/ebay_auth.ts status
@@ -39,12 +38,9 @@
  *       short names like sell.account
  */
 
-import { chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { ENV_PATH, readEnvFile, updateEnvFile } from "../lib/env_file.ts";
 import { tradingCall } from "../lib/trading_api.ts";
-
-export const CREDS_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "credentials.json");
 
 const TOKEN_URL = "https://api.ebay.com/identity/v1/oauth2/token";
 const SCOPE_BASE = "https://api.ebay.com/oauth/api_scope";
@@ -94,17 +90,65 @@ export function die(msg: string): never {
   process.exit(1);
 }
 
-// ---- credentials.json -------------------------------------------------------
+// ---- credentials in .env ----------------------------------------------------
+
+/** `jdm-direct-motors` -> `EBAY_JDM_DIRECT_MOTORS_` */
+function accountPrefix(name: string): string {
+  return `EBAY_${name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_`;
+}
+
+const list = (s: string | undefined) => (s ? s.split(/[\s,]+/).filter(Boolean) : undefined);
+const joined = (a: string[] | undefined) => (a?.length ? a.join(" ") : undefined);
+
+function accountFromEnv(env: Record<string, string>, name: string): AccountCreds {
+  const p = accountPrefix(name);
+  const v = (k: string) => env[p + k] || undefined;
+  const account: AccountCreds = {};
+  if (v("USER_ID")) account.ebayUserId = v("USER_ID");
+  if (v("AUTHNAUTH_TOKEN")) account.authnauth = { token: v("AUTHNAUTH_TOKEN")!, expiresAt: v("AUTHNAUTH_EXPIRES_AT") };
+  if (v("OAUTH_REFRESH_TOKEN") || v("OAUTH_ACCESS_TOKEN")) {
+    account.oauth = {
+      refreshToken: v("OAUTH_REFRESH_TOKEN"),
+      refreshTokenExpiresAt: v("OAUTH_REFRESH_TOKEN_EXPIRES_AT"),
+      scopes: list(v("OAUTH_SCOPES")),
+      signedInAt: v("OAUTH_SIGNED_IN_AT"),
+      accessToken: v("OAUTH_ACCESS_TOKEN"),
+      accessTokenExpiresAt: v("OAUTH_ACCESS_TOKEN_EXPIRES_AT"),
+      accessTokenScopes: list(v("OAUTH_ACCESS_TOKEN_SCOPES")),
+    };
+  }
+  return account;
+}
+
+/** The .env keys (and values; undefined = remove) that store `account`. */
+export function accountToEnv(name: string, account: AccountCreds): Record<string, string | undefined> {
+  const p = accountPrefix(name);
+  const o = account.oauth;
+  return {
+    [`${p}USER_ID`]: account.ebayUserId,
+    [`${p}AUTHNAUTH_TOKEN`]: account.authnauth?.token,
+    [`${p}AUTHNAUTH_EXPIRES_AT`]: account.authnauth?.expiresAt,
+    [`${p}OAUTH_REFRESH_TOKEN`]: o?.refreshToken,
+    [`${p}OAUTH_REFRESH_TOKEN_EXPIRES_AT`]: o?.refreshTokenExpiresAt,
+    [`${p}OAUTH_SCOPES`]: joined(o?.scopes),
+    [`${p}OAUTH_SIGNED_IN_AT`]: o?.signedInAt,
+    [`${p}OAUTH_ACCESS_TOKEN`]: o?.accessToken,
+    [`${p}OAUTH_ACCESS_TOKEN_EXPIRES_AT`]: o?.accessTokenExpiresAt,
+    [`${p}OAUTH_ACCESS_TOKEN_SCOPES`]: joined(o?.accessTokenScopes),
+  };
+}
 
 let cache: CredentialsFile | undefined;
 
 function readFromDisk(): CredentialsFile {
-  if (!existsSync(CREDS_PATH)) die(`ERROR: no credentials.json found at ${CREDS_PATH}`);
-  const parsed = JSON.parse(readFileSync(CREDS_PATH, "utf8"));
-  if (!parsed || typeof parsed.accounts !== "object") {
-    die(`ERROR: ${CREDS_PATH} has no "accounts" object -- see the layout in src/auth/ebay_auth.ts`);
-  }
-  return parsed as CredentialsFile;
+  const env = readEnvFile();
+  const names = list(env.EBAY_ACCOUNTS);
+  if (!names) die(`ERROR: no EBAY_ACCOUNTS in ${ENV_PATH} -- see the layout in src/auth/ebay_auth.ts`);
+  const app =
+    env.EBAY_APP_CLIENT_ID || env.EBAY_APP_CLIENT_SECRET
+      ? { clientId: env.EBAY_APP_CLIENT_ID ?? "", clientSecret: env.EBAY_APP_CLIENT_SECRET ?? "", ruName: env.EBAY_APP_RU_NAME ?? "" }
+      : undefined;
+  return { app, accounts: Object.fromEntries(names.map((n) => [n, accountFromEnv(env, n)])) };
 }
 
 export function loadCredentials(): CredentialsFile {
@@ -112,17 +156,17 @@ export function loadCredentials(): CredentialsFile {
   return cache;
 }
 
-/** Apply `mutate` to one account and save. Re-reads the file first so a
- * concurrent run's changes to other fields aren't clobbered, then writes via
- * a temp file + rename so a crash can't leave a half-written file. */
+/** Apply `mutate` to one account and save it to .env. Re-reads the file first
+ * so a concurrent run's changes to other fields aren't clobbered. */
 export function updateAccount(name: string, mutate: (account: AccountCreds) => void): void {
   const fresh = readFromDisk();
+  const isNew = !fresh.accounts[name];
   fresh.accounts[name] ??= {};
   mutate(fresh.accounts[name]);
-  const tmp = `${CREDS_PATH}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(fresh, null, 2) + "\n", { mode: 0o600 });
-  renameSync(tmp, CREDS_PATH);
-  chmodSync(CREDS_PATH, 0o600);
+  updateEnvFile({
+    ...(isNew ? { EBAY_ACCOUNTS: Object.keys(fresh.accounts).join(",") } : {}),
+    ...accountToEnv(name, fresh.accounts[name]),
+  });
   cache = fresh;
 }
 
@@ -132,7 +176,7 @@ export function accountNames(): string[] {
 
 export function getAccount(name: string): AccountCreds {
   const account = loadCredentials().accounts[name];
-  if (!account) die(`ERROR: no account '${name}' in credentials.json. Known accounts: ${accountNames().join(", ")}`);
+  if (!account) die(`ERROR: no account '${name}' in .env (EBAY_ACCOUNTS). Known accounts: ${accountNames().join(", ")}`);
   return account;
 }
 
@@ -175,7 +219,7 @@ export function authnAuthToken(name: string): string {
   const creds = getAccount(name).authnauth;
   if (!creds?.token) {
     die(
-      `ERROR: ${name} has no Auth'n'Auth token in credentials.json. Make one at developer.ebay.com ->\n` +
+      `ERROR: ${name} has no Auth'n'Auth token in .env. Make one at developer.ebay.com ->\n` +
         "User Tokens -> Get a Token from eBay via Your Application -> Auth'n'Auth, then add it."
     );
   }
@@ -216,7 +260,7 @@ export interface TokenResponse {
  * Throws with eBay's error / error_description on failure. */
 export async function requestToken(params: Record<string, string>): Promise<TokenResponse> {
   const app = loadCredentials().app;
-  if (!app?.clientId || !app.clientSecret) die('ERROR: credentials.json has no "app" { clientId, clientSecret }.');
+  if (!app?.clientId || !app.clientSecret) die("ERROR: .env has no EBAY_APP_CLIENT_ID / EBAY_APP_CLIENT_SECRET.");
   const basic = Buffer.from(`${app.clientId}:${app.clientSecret}`).toString("base64");
   const resp = await fetch(TOKEN_URL, {
     method: "POST",
@@ -241,7 +285,7 @@ const inflight = new Map<string, Promise<string>>();
 /**
  * An OAuth user access token for `name` that covers `scopes` (full URLs or
  * short names). Reuses the saved token while it's valid for 5+ more minutes;
- * otherwise refreshes it and saves the new one to credentials.json.
+ * otherwise refreshes it and saves the new one to .env.
  */
 export async function oauthToken(name: string, scopes: string[]): Promise<string> {
   const needed = [...new Set(scopes.map(expandScope))];
@@ -357,7 +401,7 @@ async function whoami(name: string): Promise<void> {
   const id = await getUserId(authnAuthToken(name));
   const stored = getAccount(name).ebayUserId;
   if (stored && stored.toLowerCase() !== id.toLowerCase()) {
-    die(`MISMATCH: ${name}'s token belongs to eBay user '${id}', but credentials.json records '${stored}'. Nothing changed.`);
+    die(`MISMATCH: ${name}'s token belongs to eBay user '${id}', but .env records '${stored}'. Nothing changed.`);
   }
   if (!stored) updateAccount(name, (a) => (a.ebayUserId = id));
   console.log(`${name} -> eBay user ${id}${stored ? "" : " (recorded)"}`);

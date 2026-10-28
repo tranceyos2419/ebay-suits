@@ -11,7 +11,7 @@
  *
  * TOKENS -- two different ones, because these are two different APIs; both
  * come from src/auth/ebay_auth.ts for the --account given:
- *   findEligibleItems    OAuth user token with scope sell.negotiation (REST;
+ *   findEligibleItems    OAuth user token with scope sell.inventory (REST;
  *                        an Auth'n'Auth token gets 403 "Insufficient
  *                        permissions" here). Refreshed automatically; the
  *                        account needs an OAuth sign-in (src/auth/ebay_login.ts).
@@ -41,7 +41,7 @@
  * approximation: it cannot see abandoned-cart buyers, and it does not know
  * about eBay's other exclusions (multi-variation listings, listings that
  * already have an offer out, Inventory-API-managed listings). Use
- * --source negotiation once a sell.negotiation token exists.
+ * --source negotiation once a sell.inventory token exists.
  *
  * Read-only: it sends no offers. Sending is a separate call
  * (sendOfferToInterestedBuyers) and is deliberately not implemented here.
@@ -58,7 +58,8 @@ import { DAY_MS, runMain, sleep } from "../lib/util.ts";
 const NEGOTIATION_BASE = "https://api.ebay.com/sell/negotiation/v1";
 const PAGE_LIMIT = 200; // findEligibleItems max page size
 const DETAIL_DELAY_MS = 120; // be gentle: one GetItem per eligible listing
-const NEGOTIATION_SCOPE = "sell.negotiation";
+// The Negotiation API has no scope of its own; it takes sell.inventory.
+const NEGOTIATION_SCOPE = "sell.inventory";
 
 interface Options {
   source: "negotiation" | "watchers";
@@ -192,7 +193,7 @@ async function fetchEligiblePage(
     console.error(`ERROR ${resp.status} from find_eligible_items:\n${text}`);
     if (resp.status === 401 || resp.status === 403) {
       console.error(
-        "\nThis call needs an OAuth user token granted the sell.negotiation scope.\n" +
+        "\nThis call needs an OAuth user token granted the sell.inventory scope.\n" +
           "Check the account's sign-in with: npx tsx src/auth/ebay_auth.ts status"
       );
     }

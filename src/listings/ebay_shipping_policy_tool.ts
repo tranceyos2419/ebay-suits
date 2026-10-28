@@ -13,8 +13,8 @@
  *     scope sell.account, refreshed automatically. The account needs an
  *     OAuth sign-in first (src/auth/ebay_login.ts).
  *   - Trading API (everything else): the account's Auth'n'Auth token.
- * With --sandbox, credentials.json isn't used (it holds Production tokens):
- * put a Sandbox user token in EBAY_SANDBOX_TOKEN instead of --account.
+ * With --sandbox, the Production tokens in .env aren't used:
+ * put a Sandbox user token in EBAY_SANDBOX_TOKEN in .env instead of --account.
  *
  * Usage
  * -----
@@ -82,7 +82,7 @@
  *
  * Flags
  * -----
- *   --account        Seller account in credentials.json (required unless --sandbox).
+ *   --account        Seller account in .env (required unless --sandbox).
  *   --sandbox        Use eBay Sandbox endpoints instead of Production.
  *   --marketplace    Marketplace ID for the Account API (default EBAY_US).
  *   --site-id        Trading API SiteID (default 0 = US).
@@ -107,6 +107,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { findBlocks, findText } from "../lib/xml_util.ts";
 import { accountFromArgs, authnAuthToken, die, oauthToken } from "../auth/ebay_auth.ts";
+import { readEnvFile } from "../lib/env_file.ts";
 import { csvCell, parseCsv } from "../lib/csv.ts";
 import {
   TRADING_API,
@@ -135,7 +136,7 @@ const ACCOUNT_API_SCOPE = "sell.account";
 let account = "";
 
 function sandboxToken(): string {
-  return process.env.EBAY_SANDBOX_TOKEN ?? die("ERROR: --sandbox needs a Sandbox user token in EBAY_SANDBOX_TOKEN.");
+  return readEnvFile().EBAY_SANDBOX_TOKEN || die("ERROR: --sandbox needs a Sandbox user token in EBAY_SANDBOX_TOKEN in .env.");
 }
 
 /** OAuth user token for the Account API (REST). */

@@ -20,7 +20,7 @@
  *   npx tsx src/sales/find_order_by_tracking.ts <tracking-number> --from 2026-06-20 --to 2026-08-10
  *   npx tsx src/sales/find_order_by_tracking.ts <tracking-number> --account jdm-direct-motors --month 2026-07
  *
- * With no --account, every account in credentials.json is searched (each
+ * With no --account, every account in .env (EBAY_ACCOUNTS) is searched (each
  * with its own Auth'n'Auth token, via src/auth/ebay_auth.ts).
  */
 
