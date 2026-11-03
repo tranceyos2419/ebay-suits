@@ -62,6 +62,7 @@ function presetsFor(state: string): readonly InquiryPreset[] {
 
 export type Cause =
   | "DELIVERED_PER_TRACKING"
+  | "DELIVERED_AFTER_OPENED"
   | "LATE_IN_TRANSIT"
   | "OPENED_BEFORE_EDD"
   | "NO_TRACKING_UPLOADED"
@@ -70,6 +71,7 @@ export type Cause =
 
 const CAUSE_TEXT: Record<Cause, string> = {
   DELIVERED_PER_TRACKING: "Delivered per tracking, buyer says not received",
+  DELIVERED_AFTER_OPENED: "Delivered late, after the inquiry was opened",
   LATE_IN_TRANSIT: "Not delivered, past estimated delivery date",
   OPENED_BEFORE_EDD: "Not delivered, opened before estimated delivery date",
   NO_TRACKING_UPLOADED: "Shipped but no tracking on the order",
@@ -91,6 +93,7 @@ interface Row {
   shippedAt?: string;
   deliveredAt?: string;
   eddLatest?: string;
+  handlingDays?: number;
   daysPastEddAtOpen?: number;
   daysInTransit?: number;
   cause: Cause;
@@ -102,6 +105,7 @@ const daysBetween = (a: string, b: string) => Math.round((Date.parse(b) - Date.p
 function buildRow(account: string, inq: InquiryRecord, order: any, uploaded: ShipmentTracking[]): Row {
   const li = (order?.lineItems ?? []).find((l: any) => String(l.lineItemId) === inq.orderLineItemId) ?? order?.lineItems?.[0];
   const step = order?.fulfillmentStartInstructions?.[0]?.shippingStep;
+  inq.itemId ||= String(li?.legacyItemId ?? "");
 
   // Prefer the shipment eBay tracks for this line; fall back to the tracking uploaded on the order.
   const ship = inq.shipments.find((s) => s.trackingNumber) ?? inq.shipments[0];
@@ -114,7 +118,8 @@ function buildRow(account: string, inq: InquiryRecord, order: any, uploaded: Shi
     inq.estimatedDelivery?.latest || li?.lineItemFulfillmentInstructions?.maxEstimatedDeliveryDate || undefined;
 
   let cause: Cause;
-  if (deliveredAt) cause = "DELIVERED_PER_TRACKING";
+  if (deliveredAt && Date.parse(deliveredAt) <= Date.parse(inq.createdAt)) cause = "DELIVERED_PER_TRACKING";
+  else if (deliveredAt) cause = "DELIVERED_AFTER_OPENED";
   else if (!trackingNumber && !shippedAt && order?.orderFulfillmentStatus !== "FULFILLED") cause = "NOT_SHIPPED";
   else if (!trackingNumber) cause = "NO_TRACKING_UPLOADED";
   else if (eddLatest && Date.parse(inq.createdAt) < Date.parse(eddLatest)) cause = "OPENED_BEFORE_EDD";
@@ -143,6 +148,7 @@ function buildRow(account: string, inq: InquiryRecord, order: any, uploaded: Shi
     shippedAt,
     deliveredAt,
     eddLatest,
+    handlingDays: shippedAt && order?.creationDate ? daysBetween(order.creationDate, shippedAt) : undefined,
     daysPastEddAtOpen: eddLatest ? daysBetween(eddLatest, inq.createdAt) : undefined,
     daysInTransit: shippedAt ? daysBetween(shippedAt, deliveredAt ?? new Date().toISOString()) : undefined,
     cause,
@@ -152,7 +158,7 @@ function buildRow(account: string, inq: InquiryRecord, order: any, uploaded: Shi
 const HEADER = [
   "Account", "Inquiry ID", "Status", "Waiting on", "Opened", "Respond by", "Order ID", "Order date", "Item ID",
   "Title", "Buyer", "Country", "Shipping service", "Carrier", "Tracking number", "Tracking status", "Shipped",
-  "Delivered", "Est. delivery (latest)", "Days past EDD when opened", "Days in transit", "Order total",
+  "Delivered", "Days order to ship", "Est. delivery (latest)", "Days past EDD when opened", "Days in transit", "Order total",
   "Seller tracking in inquiry", "Cause",
 ];
 
@@ -161,7 +167,7 @@ function csvRow(r: Row): (string | number)[] {
   return [
     r.account, i.inquiryId, i.statusText || i.statusCode, i.preset.replace("AWAITING_ACTION_FROM_", ""), day(i.createdAt),
     day(i.respondBy?.dueAt), i.orderId, day(r.orderDate), i.itemId, r.title, i.buyer, r.country, r.shippingService,
-    r.carrier, r.trackingNumber, r.trackingStatus, day(r.shippedAt), day(r.deliveredAt), day(r.eddLatest),
+    r.carrier, r.trackingNumber, r.trackingStatus, day(r.shippedAt), day(r.deliveredAt), r.handlingDays ?? "", day(r.eddLatest),
     r.daysPastEddAtOpen ?? "", r.daysInTransit ?? "", r.total,
     i.providedTracking.map((p) => `${p.carrier} ${p.trackingNumber}`).join("; "), CAUSE_TEXT[r.cause],
   ];

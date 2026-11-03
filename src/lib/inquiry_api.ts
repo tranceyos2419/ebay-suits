@@ -16,6 +16,10 @@
  *     Modernized place that says whether a package was delivered.
  *   - The order line carries no item title or ship-to country; use the
  *     Fulfillment API (src/lib/fulfillment_api.ts) for those.
+ *   - eBay sometimes fails to resolve a line's listing (item id) or shipment,
+ *     which nulls the whole page (seen on jdm-direct-motors' closed
+ *     inquiries). Such pages are re-read without those fields; itemId is then
+ *     blank and the caller can fill it in from the order.
  */
 
 import { IDENTITY_SCOPE, oauthToken } from "../auth/ebay_auth.ts";
@@ -72,8 +76,8 @@ export function inquiryToken(account: string): Promise<string> {
 }
 
 const CARRIER = `shippingCarrier { carrierCode unsupportedCarrierName }`;
-/** `withLogistics` adds the order line's shipping execution, which is dropped if eBay fails to resolve it. */
-function inquiryFields(withLogistics: boolean): string {
+/** `full` adds the listing and the order line's shipping execution, which are dropped if eBay fails to resolve them. */
+function inquiryFields(full: boolean): string {
   return `
   __typename inquiryId createdAt closedAt initiator responder
   status { code displayText }
@@ -83,8 +87,8 @@ function inquiryFields(withLogistics: boolean): string {
     orderLineItem {
       orderLineItemId
       orderReference { orderId buyer { username } }
-      lineItem { ... on ContractListingItem { item { itemId } } }
-      ${withLogistics ? FULFILLMENT : ""}
+      ${full ? "lineItem { ... on ContractListingItem { item { itemId } } }" : ""}
+      ${full ? FULFILLMENT : ""}
     }
   }
   providedInformation {
@@ -105,17 +109,17 @@ const FULFILLMENT = `fulfillmentExecution { logisticsExecutionSteps { __typename
   } } }
 } } }`;
 
-function searchQuery(withLogistics: boolean): string {
+function searchQuery(full: boolean): string {
   return `query SellerInquiries($input: SellerOrderInquiriesInput!) {
   sellerOrderInquiries(input: $input) {
     __typename
     ... on BusinessError { errorCode errorMessage }
-    ... on SellerOrderInquiries { pagination { nextCursor } orderInquiries { ${inquiryFields(withLogistics)} } }
+    ... on SellerOrderInquiries { pagination { nextCursor } orderInquiries { ${inquiryFields(full)} } }
   }
 }`;
 }
 const FULL_QUERY = searchQuery(true);
-const NO_LOGISTICS_QUERY = searchQuery(false);
+const MINIMAL_QUERY = searchQuery(false);
 
 function carrierName(c: any): string {
   return c?.unsupportedCarrierName || c?.carrierCode || "";
@@ -205,7 +209,8 @@ async function fetchPage(
   for (let attempt = 0; ; attempt++) {
     const r = await graphqlCall(token, query, { input }, marketplace);
     const o = r.data?.sellerOrderInquiries;
-    if (o) {
+    // A failed nested field can null the inquiry list while leaving the wrapper.
+    if (o && !(o.__typename === "SellerOrderInquiries" && o.orderInquiries == null && r.errors.length)) {
       if (o.__typename !== "SellerOrderInquiries") {
         throw new Error(`sellerOrderInquiries: ${o.__typename} ${o.errorCode ?? ""} ${o.errorMessage ?? ""}`);
       }
@@ -247,10 +252,10 @@ async function searchPreset(
         };
     let { page, errors } = await fetchPage(token, FULL_QUERY, input, marketplace);
     if (!page) {
-      // A shipment eBay can't resolve nulls the page; read it without logistics.
-      ({ page } = await fetchPage(token, NO_LOGISTICS_QUERY, input, marketplace));
+      // A listing or shipment eBay can't resolve nulls the page; read it without them.
+      ({ page } = await fetchPage(token, MINIMAL_QUERY, input, marketplace));
       if (!page) throw new Error(`sellerOrderInquiries failed:\n${errors.map(formatError).join("\n")}`);
-      console.error(`[inquiry_api] warning: a ${preset} page was read without shipment data`);
+      console.error(`[inquiry_api] warning: a ${preset} page was read without item ids and shipment data`);
       errors = [];
     }
     if (errors.length) warnPartial(errors);
