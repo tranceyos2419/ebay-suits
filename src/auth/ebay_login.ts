@@ -46,8 +46,8 @@ const AUTHORIZE_URL = "https://auth.ebay.com/oauth2/authorize";
 // Asked for once at sign-in, so a script using another of these APIs later
 // doesn't need a new sign-in. api_scope is the base scope;
 // commerce.identity.readonly is needed for the identity check below.
-// sell.listing / sell.order / sell.return / commerce.message are the
-// Modernized APIs that replace Trading and Post-Order (src/lib/graphql_api.ts).
+// sell.listing / sell.order / sell.return / sell.inquiry / commerce.message are
+// the Modernized APIs that replace Trading and Post-Order (src/lib/graphql_api.ts).
 const DEFAULT_SCOPES = [
   "api_scope",
   "sell.account",
@@ -57,6 +57,7 @@ const DEFAULT_SCOPES = [
   "sell.listing",
   "sell.order",
   "sell.return",
+  "sell.inquiry",
   "commerce.message",
   "commerce.identity.readonly",
 ];

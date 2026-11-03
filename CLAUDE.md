@@ -25,6 +25,7 @@ Keep files organized by category by default:
   - `src/pricing/` — price lookups and competitor/price-tracker comparisons
   - `src/sales/` — orders, revenue and payouts
   - `src/returns/` — returns and refunds
+  - `src/cases/` — Item Not Received inquiries and eBay cases
   - `src/messages/` — buyer messages
   - `src/shipping/` — Ship&Co orders and shipping labels
   - `src/maintenance/` — housekeeping for this project (e.g. report cleanup)
@@ -48,7 +49,7 @@ Default to using the eBay API for any interaction with eBay. Use another method 
 ### Use eBay's Modernized APIs
 
 All new work — new scripts, new features, and any change to an existing script — must use eBay's Modernized APIs, never the Traditional ones:
-- GraphQL at `https://graphqlapi.ebay.com/graphql` (`src/lib/graphql_api.ts`): Listing API for reading and updating our listings, Return API for returns.
+- GraphQL at `https://graphqlapi.ebay.com/graphql` (`src/lib/graphql_api.ts`): Listing API for reading and updating our listings, Return API for returns, Order Inquiry API for Item Not Received inquiries.
 - Modern REST APIs: Fulfillment (orders), Message (buyer messages), Browse (other sellers' listings), Account, Negotiation, Finances, Identity.
 - Do not use the Trading API (XML), the Post-Order API, or Auth'n'Auth tokens in new code. The old Trading/Post-Order versions live in `src/legacy/` for reference only; don't add to them or import them from outside `src/legacy/`.
 - If something truly has no Modernized API equivalent yet, stop and tell the user before falling back to a Traditional API.
