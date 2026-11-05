@@ -9,7 +9,7 @@ Open 3D Seller through the connector.
 
 Select the store jdm-direct-motors.
 
-Go to Helpdesk, then open Motor Low 36H.
+Go to Helpdesk, then open Motor Low 36H and New Ticket. Don't check Motor Low 36H only; also open the tickets in New Ticket.
 
 Review incoming messages asking about vehicle compatibility.
 
@@ -35,7 +35,7 @@ If the buyer asks what is included with the product, check the MPN on the eBay l
 ## Notes for the 3Dsellers connector
 
 - "Motor Low 36H" and "Motor Priority 24h" are the custom statuses "Motors Low 36h" and "Motors Priority 24h". The connector can't filter on them or set them, so moving a ticket to Priority 24h is done by hand in 3Dsellers.
-- Find buyer questions with `get-helpdesk-tickets` (sellerId 593062, source `regular`, `lastMessageAfter`) and keep tickets whose newest message is from the buyer.
+- Find buyer questions with `get-helpdesk-tickets` (sellerId 593062, source `regular`, `lastMessageAfter`) and keep tickets whose newest message is from the buyer. Cover both "Motors Low 36h" and New Ticket (`new_ticket`); a buyer reply moves a resolved ticket back to New Ticket.
 - Read the MPN with the Browse API (`src/lib/browse_api.ts` → `getLegacyItem`). Our listings have no eBay fitment tables (`check_compatibility` returns error 11505), so check fitment in the genuine parts catalogs.
 - Decode US VINs with NHTSA vPIC: `https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValues/<VIN>?format=json`.
 - Replies are sent with authorName "Claude connector". Each ticket takes at most 1 reply per minute and 10 per day.
