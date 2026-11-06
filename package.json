@@ -8,6 +8,7 @@
     "shipping-policy": "tsx src/listings/ebay_shipping_policy_tool.ts",
     "auth": "tsx src/auth/ebay_auth.ts",
     "login": "tsx src/auth/ebay_login.ts",
+    "web-env": "tsx src/auth/web_env.ts",
     "weekly-revenue": "tsx src/sales/weekly_revenue.ts",
     "find-eligible-offers": "tsx src/listings/find_eligible_offer_items.ts",
     "find-return-by-tracking": "tsx src/returns/find_return_by_tracking.ts",
