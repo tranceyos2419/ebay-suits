@@ -16,7 +16,11 @@
  *     refresh token and saves it back. The refresh token itself comes from
  *     src/auth/ebay_login.ts.
  *
- * credentials.json (project root, chmod 600, gitignored):
+ * credentials.json (project root, chmod 600, gitignored) -- or, where that file
+ * doesn't exist (e.g. a Claude Code web session), the same JSON in the
+ * EBAY_CREDENTIALS_JSON environment variable. From the variable, refreshed
+ * access tokens are kept in memory only (the variable can't be written back;
+ * eBay refresh tokens don't change on refresh, so nothing is lost):
  *   {
  *     "app": { "clientId", "clientSecret", "ruName" },
  *     "accounts": {
@@ -44,6 +48,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 export const CREDS_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "credentials.json");
+export const CREDS_ENV = "EBAY_CREDENTIALS_JSON";
 
 const TOKEN_URL = "https://api.ebay.com/identity/v1/oauth2/token";
 const SCOPE_BASE = "https://api.ebay.com/oauth/api_scope";
@@ -99,11 +104,27 @@ export function die(msg: string): never {
 
 let cache: CredentialsFile | undefined;
 
+/** True when credentials come from EBAY_CREDENTIALS_JSON (no credentials.json). */
+export function credsFromEnv(): boolean {
+  return !existsSync(CREDS_PATH) && !!process.env[CREDS_ENV];
+}
+
 function readFromDisk(): CredentialsFile {
-  if (!existsSync(CREDS_PATH)) die(`ERROR: no credentials.json found at ${CREDS_PATH}`);
-  const parsed = JSON.parse(readFileSync(CREDS_PATH, "utf8"));
+  let source = CREDS_PATH;
+  let text: string;
+  if (existsSync(CREDS_PATH)) text = readFileSync(CREDS_PATH, "utf8");
+  else if (process.env[CREDS_ENV]) {
+    source = `the ${CREDS_ENV} environment variable`;
+    text = process.env[CREDS_ENV]!;
+  } else die(`ERROR: no credentials.json found at ${CREDS_PATH}, and ${CREDS_ENV} is not set`);
+  let parsed: any;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    die(`ERROR: ${source} is not valid JSON (${(err as Error).message})`);
+  }
   if (!parsed || typeof parsed.accounts !== "object") {
-    die(`ERROR: ${CREDS_PATH} has no "accounts" object -- see the layout in src/auth/ebay_auth.ts`);
+    die(`ERROR: ${source} has no "accounts" object -- see the layout in src/auth/ebay_auth.ts`);
   }
   return parsed as CredentialsFile;
 }
@@ -117,6 +138,13 @@ export function loadCredentials(): CredentialsFile {
  * concurrent run's changes to other fields aren't clobbered, then writes via
  * a temp file + rename so a crash can't leave a half-written file. */
 export function updateAccount(name: string, mutate: (account: AccountCreds) => void): void {
+  if (credsFromEnv()) {
+    // EBAY_CREDENTIALS_JSON can't be written back: keep the change for this run only.
+    const creds = loadCredentials();
+    creds.accounts[name] ??= {};
+    mutate(creds.accounts[name]);
+    return;
+  }
   const fresh = readFromDisk();
   fresh.accounts[name] ??= {};
   mutate(fresh.accounts[name]);
@@ -330,6 +358,7 @@ function describeExpiry(iso: string | undefined): string {
 function status(): void {
   const creds = loadCredentials();
   const app = creds.app;
+  console.log(`credentials from: ${credsFromEnv() ? CREDS_ENV : CREDS_PATH}`);
   console.log(`app keys: ${app?.clientId && app.clientSecret ? "present" : "MISSING"}${app?.ruName ? ", RuName set" : ", no RuName"}`);
   for (const [name, a] of Object.entries(creds.accounts)) {
     const o = a.oauth ?? {};

@@ -42,6 +42,8 @@ Before doing anything in this folder, make sure you know which eBay account the 
 
 Once the account is known, pass it to every script with `--account <name>` (`jdm-direct-motors` or `love-of-japan`). Scripts get their tokens from `src/auth/ebay_auth.ts`; don't export tokens into the shell. Check token expiry and OAuth scopes with `npx tsx src/auth/ebay_auth.ts status`. An OAuth sign-in (`src/auth/ebay_login.ts`) needs the user to sign in to eBay in their own browser, so ask them to run it.
 
+On Claude Code on the web there is no `credentials.json` or `.env`: the `ebay-suits` cloud environment supplies the same values as the environment variables `EBAY_CREDENTIALS_JSON` (the full contents of `credentials.json`) and `SHIPANDCO_API_TOKEN`, and the scripts read them automatically. These are the live production credentials, so treat a web session exactly like the local computer: dry-run first and confirm with the user before any change to a listing, order, return or buyer message. Never print, log or commit the values. If `credentials.json` changes locally (a new sign-in or new scopes), the user must paste its new contents into `EBAY_CREDENTIALS_JSON` in the environment settings.
+
 ## Interacting with eBay
 
 Default to using the eBay API for any interaction with eBay. Use another method (e.g. browser automation) only if the user specifies otherwise.
