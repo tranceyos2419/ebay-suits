@@ -45,6 +45,8 @@ Once the account is known, pass it to every script with `--account <name>` (`jdm
 
 On Claude Code on the web there is no `credentials.json` or `.env`. The `ebay-suits` cloud environment supplies the same values as the environment variables `EBAY_CREDENTIALS_JSON` (the full contents of `credentials.json`) and `SHIPANDCO_API_TOKEN`, and the scripts read them automatically. These are the live production credentials, so treat a web session exactly like the local computer: dry-run first and confirm with the user before any change to a listing, order, return, or buyer message. Never print, log, or commit the values. If `credentials.json` changes locally (for example, after a new sign-in or new scopes), the user must paste its new contents into `EBAY_CREDENTIALS_JSON` in the environment settings.
 
+The Ship&Co API token is stored in `credentials.json` under `shipandco.apiToken` (so it also travels inside `EBAY_CREDENTIALS_JSON`); `src/lib/shipandco_api.ts` falls back to `SHIPANDCO_API_TOKEN` from the environment or `.env` only when that entry is missing.
+
 ## Interacting with eBay
 
 Default to using the eBay API for any interaction with eBay. Use another method, such as browser automation, only if the user specifies otherwise.
