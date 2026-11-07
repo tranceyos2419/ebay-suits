@@ -92,6 +92,18 @@
  *   npx tsx src/listings/ebay_shipping_policy_tool.ts --account jdm-direct-motors exclude-region \
  *       --region AE --covered-by "Middle East" --dry-run
  *
+ *   # 8. Merge duplicate policies: scan the store for listings on each
+ *   #    --from-policy-id and write a migrate-by-price style report moving
+ *   #    them to the --to-policy-id in the same position. Apply it with
+ *   #    `migrate-by-price --report-out <same file> --apply`, then delete the
+ *   #    emptied source policies (dry run first; eBay refuses to delete a
+ *   #    policy still in use).
+ *   npx tsx src/listings/ebay_shipping_policy_tool.ts --account jdm-direct-motors merge-policies \
+ *       --from-policy-id 277340578012 277341133012 --to-policy-id 259088691012 259088713012 \
+ *       --report-out reports/merge-copies.csv
+ *   npx tsx src/listings/ebay_shipping_policy_tool.ts --account jdm-direct-motors delete-policies \
+ *       --from-policy-id 277340578012 277341133012 --dry-run
+ *
  * Flags
  * -----
  *   --account        Seller account in credentials.json (required unless --sandbox).
@@ -116,6 +128,7 @@
  *   --name-contains  Case-insensitive substring filter on policy name
  *                     (scan-policies).
  *   --region         eBay region/country code to exclude (exclude-region).
+ *   --to-policy-id   Target policy IDs, one per --from-policy-id (merge-policies).
  *   --covered-by     Region names that already include --region; a policy
  *                     excluding any of them is left alone (exclude-region).
  */
@@ -307,6 +320,61 @@ async function excludeRegion(
     console.log(`\n${results.length - failed.length}/${results.length} polic(y/ies) updated successfully.`);
     if (failed.length > 0) process.exit(1);
   }
+}
+
+/** Scan the store for listings on each source policy and write a report (the
+ * migrate-by-price format, every row MATCH) moving them to the paired target. */
+async function mergePolicies(env: Env, marketplaceId: string, fromIds: string[], toIds: string[], reportOut: string) {
+  const policies = new Map((await getAllFulfillmentPolicies(env, marketplaceId)).map((p) => [p.fulfillmentPolicyId, p.name]));
+  const target = new Map<string, string>();
+  fromIds.forEach((f, i) => {
+    if (!policies.has(f) || !policies.has(toIds[i])) die(`Unknown policy id: ${policies.has(f) ? toIds[i] : f}`);
+    target.set(f, toIds[i]);
+    console.log(`  "${policies.get(f)}" (${f}) -> "${policies.get(toIds[i])}" (${toIds[i]})`);
+  });
+  console.log(`Scanning all active listings... (this can take a few minutes)`);
+  const { sourceItems } = await scanActiveListings(env, new Set(fromIds));
+  const rows: ReportRow[] = sourceItems.map((it) => ({
+    itemId: it.itemId,
+    title: it.title,
+    currentPrice: it.price,
+    sourcePolicyId: it.sourcePolicyId,
+    sourcePolicyName: it.sourcePolicyName,
+    targetPolicyId: target.get(it.sourcePolicyId)!,
+    targetPolicyName: policies.get(target.get(it.sourcePolicyId)!)!,
+    status: "MATCH",
+  }));
+  writeReportCsv(reportOut, rows);
+  console.log(`\n${rows.length} listing(s) to move, written to ${reportOut}:`);
+  for (const f of fromIds) console.log(`  ${rows.filter((r) => r.sourcePolicyId === f).length}  "${policies.get(f)}" (${f})`);
+  console.log(`Apply with: migrate-by-price --report-out ${reportOut} --apply`);
+}
+
+/** Delete fulfillment policies (Account API deleteFulfillmentPolicy). */
+async function deletePolicies(env: Env, marketplaceId: string, ids: string[], dryRun: boolean) {
+  const policies = new Map((await getAllFulfillmentPolicies(env, marketplaceId)).map((p) => [p.fulfillmentPolicyId, p.name]));
+  let failed = 0;
+  for (const id of ids) {
+    if (!policies.has(id)) {
+      console.log(`${id}: not found (already deleted?)`);
+      continue;
+    }
+    if (dryRun) {
+      console.log(`[DRY RUN] Would delete "${policies.get(id)}" (${id})`);
+      continue;
+    }
+    const resp = await fetch(`${ACCOUNT_API_HOST[env]}/sell/account/v1/fulfillment_policy/${id}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${await accountApiToken(env)}`, Accept: "application/json" },
+    });
+    console.log(`"${policies.get(id)}" (${id}): ${resp.ok ? "DELETED" : `FAILED (${resp.status})`}`);
+    if (!resp.ok) {
+      failed++;
+      console.log(`  ${await resp.text()}`);
+    }
+    await sleep(PAGE_DELAY_MS);
+  }
+  if (failed > 0) process.exit(1);
 }
 
 async function listPolicies(env: Env, marketplaceId: string) {
@@ -900,7 +968,7 @@ async function migrateByPrice(
 
 interface ParsedArgs {
   sandbox: boolean;
-  command: "list-policies" | "check-access" | "revise-items" | "migrate-by-price" | "scan-policies" | "swap-rate-table" | "exclude-region";
+  command: "list-policies" | "check-access" | "revise-items" | "migrate-by-price" | "scan-policies" | "swap-rate-table" | "exclude-region" | "merge-policies" | "delete-policies";
   marketplace: string;
   itemIds: string[];
   policyId?: string;
@@ -915,6 +983,7 @@ interface ParsedArgs {
   toRateTableId?: string;
   region?: string;
   coveredBy: string[];
+  toPolicyIds: string[];
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -935,6 +1004,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     toRateTableId: undefined,
     region: undefined,
     coveredBy: [],
+    toPolicyIds: [],
   };
 
   const rest: string[] = [];
@@ -954,10 +1024,12 @@ function parseArgs(argv: string[]): ParsedArgs {
     command !== "migrate-by-price" &&
     command !== "scan-policies" &&
     command !== "swap-rate-table" &&
-    command !== "exclude-region"
+    command !== "exclude-region" &&
+    command !== "merge-policies" &&
+    command !== "delete-policies"
   ) {
     die(
-      "Usage: ebay_shipping_policy_tool.ts (--account <name> | --sandbox) <list-policies|check-access|revise-items|migrate-by-price|scan-policies|swap-rate-table|exclude-region> [options]"
+      "Usage: ebay_shipping_policy_tool.ts (--account <name> | --sandbox) <list-policies|check-access|revise-items|migrate-by-price|scan-policies|swap-rate-table|exclude-region|merge-policies|delete-policies> [options]"
     );
   }
   args.command = command;
@@ -1017,6 +1089,9 @@ function parseArgs(argv: string[]): ParsedArgs {
       case "--region":
         args.region = rest[++i];
         break;
+      case "--to-policy-id":
+        while (rest[i + 1] && !rest[i + 1].startsWith("--")) args.toPolicyIds.push(rest[++i]);
+        break;
       case "--covered-by":
         while (rest[i + 1] && !rest[i + 1].startsWith("--")) args.coveredBy.push(rest[++i]);
         break;
@@ -1044,6 +1119,15 @@ function parseArgs(argv: string[]): ParsedArgs {
   }
 
   if (args.command === "exclude-region" && !args.region) die("--region is required for exclude-region");
+  if (args.command === "merge-policies") {
+    if (args.fromPolicyIds.length === 0 || args.fromPolicyIds.length !== args.toPolicyIds.length) {
+      die("merge-policies needs --from-policy-id and --to-policy-id lists of the same length");
+    }
+    if (!args.reportOut) die("--report-out is required for merge-policies");
+  }
+  if (args.command === "delete-policies" && args.fromPolicyIds.length === 0) {
+    die("--from-policy-id (policies to delete) is required for delete-policies");
+  }
 
   return args;
 }
@@ -1082,6 +1166,10 @@ async function main() {
     await swapRateTable(env, args.marketplace, args.fromRateTableId!, args.toRateTableId!, args.dryRun);
   } else if (args.command === "exclude-region") {
     await excludeRegion(env, args.marketplace, args.region!, args.coveredBy, args.dryRun);
+  } else if (args.command === "merge-policies") {
+    await mergePolicies(env, args.marketplace, args.fromPolicyIds, args.toPolicyIds, args.reportOut!);
+  } else if (args.command === "delete-policies") {
+    await deletePolicies(env, args.marketplace, args.fromPolicyIds, args.dryRun);
   }
 }
 
