@@ -84,6 +84,14 @@
  *   #    name); omit it to see everything found.
  *   npx tsx src/listings/ebay_shipping_policy_tool.ts --account jdm-direct-motors scan-policies --name-contains copy
  *
+ *   # 7. Stop shipping to a country on every fulfillment policy: adds it to
+ *   #    each policy's excluded ship-to locations unless the policy already
+ *   #    excludes it, or a region containing it (--covered-by, e.g. UAE is
+ *   #    inside eBay's "Middle East" region), or ships domestic only.
+ *   #    Dry run first, then drop --dry-run.
+ *   npx tsx src/listings/ebay_shipping_policy_tool.ts --account jdm-direct-motors exclude-region \
+ *       --region AE --covered-by "Middle East" --dry-run
+ *
  * Flags
  * -----
  *   --account        Seller account in credentials.json (required unless --sandbox).
@@ -107,6 +115,9 @@
  *                     and writing a fresh dry-run report (migrate-by-price).
  *   --name-contains  Case-insensitive substring filter on policy name
  *                     (scan-policies).
+ *   --region         eBay region/country code to exclude (exclude-region).
+ *   --covered-by     Region names that already include --region; a policy
+ *                     excluding any of them is left alone (exclude-region).
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -241,6 +252,60 @@ async function swapRateTable(
       console.log(`Failed: ${failed.map((f) => `${f.name} (${f.id})`).join(", ")}`);
       process.exit(1);
     }
+  }
+}
+
+/** Add a region/country (e.g. "AE") to shipToLocations.regionExcluded on every
+ * fulfillment policy that ships internationally and doesn't already exclude it
+ * or a region containing it (coveredBy, e.g. "Middle East"). PUTs the full
+ * policy back with only that list changed. */
+async function excludeRegion(
+  env: Env,
+  marketplaceId: string,
+  region: string,
+  coveredBy: string[],
+  dryRun: boolean
+) {
+  console.log(`Fetching fulfillment policies for ${marketplaceId}...`);
+  const policies = await getAllFulfillmentPolicies(env, marketplaceId);
+  const skip = new Set([region, ...coveredBy]);
+  const toUpdate: any[] = [];
+  let already = 0;
+  let domestic = 0;
+  for (const p of policies) {
+    const excluded: string[] = (p.shipToLocations?.regionExcluded ?? []).map((r: any) => r.regionName);
+    if (excluded.some((r) => skip.has(r))) already++;
+    else if (!(p.shippingOptions ?? []).some((o: any) => o.optionType === "INTERNATIONAL")) {
+      domestic++;
+      console.log(`Skipping domestic-only "${p.name}" (${p.fulfillmentPolicyId})`);
+    } else toUpdate.push(p);
+  }
+  console.log(
+    `${policies.length} total polic(y/ies): ${already} already exclude ${[...skip].join("/")}, ` +
+      `${domestic} domestic-only, ${toUpdate.length} to update.\n`
+  );
+
+  const results: Array<{ name: string; id: string; ok: boolean }> = [];
+  for (const p of toUpdate) {
+    const { fulfillmentPolicyId, ...body } = JSON.parse(JSON.stringify(p));
+    body.shipToLocations ??= {};
+    body.shipToLocations.regionExcluded = [...(body.shipToLocations.regionExcluded ?? []), { regionName: region }];
+
+    if (dryRun) {
+      console.log(`[DRY RUN] Would exclude ${region} on "${p.name}" (${fulfillmentPolicyId})`);
+      continue;
+    }
+    const result = await updateFulfillmentPolicy(env, fulfillmentPolicyId, body);
+    console.log(`"${p.name}" (${fulfillmentPolicyId}): ${result.ok ? "OK" : `FAILED (${result.status})`}`);
+    if (!result.ok) console.log(`  ${result.text}`);
+    results.push({ name: p.name, id: fulfillmentPolicyId, ok: result.ok });
+    await sleep(PAGE_DELAY_MS);
+  }
+
+  if (!dryRun) {
+    const failed = results.filter((r) => !r.ok);
+    console.log(`\n${results.length - failed.length}/${results.length} polic(y/ies) updated successfully.`);
+    if (failed.length > 0) process.exit(1);
   }
 }
 
@@ -835,7 +900,7 @@ async function migrateByPrice(
 
 interface ParsedArgs {
   sandbox: boolean;
-  command: "list-policies" | "check-access" | "revise-items" | "migrate-by-price" | "scan-policies" | "swap-rate-table";
+  command: "list-policies" | "check-access" | "revise-items" | "migrate-by-price" | "scan-policies" | "swap-rate-table" | "exclude-region";
   marketplace: string;
   itemIds: string[];
   policyId?: string;
@@ -848,6 +913,8 @@ interface ParsedArgs {
   nameContains?: string;
   fromRateTableId?: string;
   toRateTableId?: string;
+  region?: string;
+  coveredBy: string[];
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -866,6 +933,8 @@ function parseArgs(argv: string[]): ParsedArgs {
     nameContains: undefined,
     fromRateTableId: undefined,
     toRateTableId: undefined,
+    region: undefined,
+    coveredBy: [],
   };
 
   const rest: string[] = [];
@@ -884,10 +953,11 @@ function parseArgs(argv: string[]): ParsedArgs {
     command !== "revise-items" &&
     command !== "migrate-by-price" &&
     command !== "scan-policies" &&
-    command !== "swap-rate-table"
+    command !== "swap-rate-table" &&
+    command !== "exclude-region"
   ) {
     die(
-      "Usage: ebay_shipping_policy_tool.ts (--account <name> | --sandbox) <list-policies|check-access|revise-items|migrate-by-price|scan-policies|swap-rate-table> [options]"
+      "Usage: ebay_shipping_policy_tool.ts (--account <name> | --sandbox) <list-policies|check-access|revise-items|migrate-by-price|scan-policies|swap-rate-table|exclude-region> [options]"
     );
   }
   args.command = command;
@@ -944,6 +1014,12 @@ function parseArgs(argv: string[]): ParsedArgs {
       case "--to-rate-table-id":
         args.toRateTableId = rest[++i];
         break;
+      case "--region":
+        args.region = rest[++i];
+        break;
+      case "--covered-by":
+        while (rest[i + 1] && !rest[i + 1].startsWith("--")) args.coveredBy.push(rest[++i]);
+        break;
       default:
         die(`Unknown option: ${a}`);
     }
@@ -966,6 +1042,8 @@ function parseArgs(argv: string[]): ParsedArgs {
     if (!args.fromRateTableId) die("--from-rate-table-id is required for swap-rate-table");
     if (!args.toRateTableId) die("--to-rate-table-id is required for swap-rate-table");
   }
+
+  if (args.command === "exclude-region" && !args.region) die("--region is required for exclude-region");
 
   return args;
 }
@@ -1002,6 +1080,8 @@ async function main() {
     await scanPolicies(env, args.nameContains);
   } else if (args.command === "swap-rate-table") {
     await swapRateTable(env, args.marketplace, args.fromRateTableId!, args.toRateTableId!, args.dryRun);
+  } else if (args.command === "exclude-region") {
+    await excludeRegion(env, args.marketplace, args.region!, args.coveredBy, args.dryRun);
   }
 }
 
