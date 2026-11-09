@@ -12,7 +12,8 @@
     "weekly-revenue": "tsx src/sales/weekly_revenue.ts",
     "find-eligible-offers": "tsx src/listings/find_eligible_offer_items.ts",
     "find-return-by-tracking": "tsx src/returns/find_return_by_tracking.ts",
-    "cleanup-reports": "tsx src/maintenance/cleanup_reports.ts"
+    "cleanup-reports": "tsx src/maintenance/cleanup_reports.ts",
+    "stamp-airpacket": "tsx src/shipping/stamp_airpacket.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
@@ -20,6 +21,8 @@
     "typescript": "^5.6.0"
   },
   "dependencies": {
-    "exceljs": "^4.4.0"
+    "exceljs": "^4.4.0",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^4.10.38"
   }
 }
