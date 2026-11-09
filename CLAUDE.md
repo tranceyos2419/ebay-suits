@@ -36,6 +36,10 @@ Keep files organized by category by default:
 
 When adding new files, place them in the category folder they belong to rather than the project root.
 
+## Shipping label PDFs (国際エアパケット stamp)
+
+Whenever the user sends a PDF, check it automatically with `src/shipping/stamp_airpacket.ts`. If it is a Japan Post 国際エアパケット dispatch note, it gets the OSAKA KITA stamp and is saved as `stamped/<name>-OSAKA-KITA.pdf`; send that stamped PDF back to the user. Other PDFs (EMS, invoices, etc.) are left unstamped. In Claude Code this runs by itself: `.claude/settings.json` installs dependencies at session start (`.claude/hooks/session-start.sh`) and checks every PDF attached to a message (`.claude/hooks/stamp-uploads.sh`). If the hook did not run, run `npx tsx src/shipping/stamp_airpacket.ts <pdf> --out stamped` yourself. `stamped/` is gitignored because labels contain buyer addresses; never commit them.
+
 ## Which eBay account
 
 Before doing anything in this folder, make sure you know which eBay account the task applies to. If the user's message doesn't make it clear, ask them which account to work on before proceeding.
